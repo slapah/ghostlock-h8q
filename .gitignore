@@ -1,8 +1,9 @@
 build/
+apk/.gradle/
+apk/local.properties
 *.img
 *.img.lz4
 *.lz4
 kernel
 *.elf
 *.btf
-*.so

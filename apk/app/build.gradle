@@ -1,0 +1,58 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'dev.ghostlock.h8q'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId 'dev.ghostlock.h8q'
+        minSdk 30
+        targetSdk 34
+        versionCode 1
+        versionName '1.0'
+        ndk {
+            abiFilters 'arm64-v8a'
+        }
+    }
+
+    // The bundled ksud/preload.so are already compressed binaries; keep them
+    // byte-exact in the APK so their sha256 survives packaging.
+    androidResources {
+        noCompress 'so', 'ksud'
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    buildTypes {
+        debug {
+            // Ship a debuggable, unminified build for on-device testing.
+        }
+    }
+}
+
+// Shizuku (via appcompat) drags in the legacy kotlin-stdlib-jdk7/jdk8 split
+// modules, which duplicate classes now merged into kotlin-stdlib >= 1.8.
+// Pin one stdlib and drop the split artifacts.
+configurations.configureEach {
+    resolutionStrategy {
+        force 'org.jetbrains.kotlin:kotlin-stdlib:1.9.24'
+        eachDependency { details ->
+            if (details.requested.group == 'org.jetbrains.kotlin'
+                    && (details.requested.name == 'kotlin-stdlib-jdk7'
+                    || details.requested.name == 'kotlin-stdlib-jdk8')) {
+                details.useTarget 'org.jetbrains.kotlin:kotlin-stdlib:1.9.24'
+            }
+        }
+    }
+}
+
+dependencies {
+    implementation 'androidx.appcompat:appcompat:1.7.0'
+    implementation 'dev.rikka.shizuku:api:13.1.5'
+    implementation 'dev.rikka.shizuku:provider:13.1.5'
+}
