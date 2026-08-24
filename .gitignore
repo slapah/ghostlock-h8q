@@ -1,0 +1,8 @@
+build/
+*.img
+*.img.lz4
+*.lz4
+kernel
+*.elf
+*.btf
+*.so
