@@ -1,4 +1,4 @@
-PROJECT ?= q8q-F976U1UEU1AZFW
+PROJECT ?= h8q-F971USQU1AZFW
 OUTDIR  := build
 
 TARGET_HEADER := src/targets/$(PROJECT)/target.h

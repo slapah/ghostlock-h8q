@@ -21,6 +21,6 @@ __attribute__((constructor)) static void load(void) {
     NULL,
   };
 
-  pr_success("preload starting pid=%d\n", getpid());
+  pr_success("preload starting pid=%d target=%s\n", getpid(), BUILD_VARIANT_LABEL);
   run_exploit(1, argv);
 }
