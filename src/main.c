@@ -121,6 +121,10 @@ int run_exploit(int argc, char **argv) {
   } else {
     pr_info("SKIP_SELINUX set; going straight to pipe flag\n");
   }
+  if (getenv("SELINUX_ONLY")) {
+    pr_success("SELINUX_ONLY set; stopping before pipe flag\n");
+    return 0;
+  }
   atomic_store(&current_phase, PHASE_PIPE_FLAG);
   return pipe_flag_write();
 }

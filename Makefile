@@ -19,7 +19,12 @@ CFLAGS := -O2 -g0 -fPIC -Wall -Wextra \
 
 OUT := $(OUTDIR)/preload.so
 
-.PHONY: all clean
+.PHONY: all clean rezygisk
+
+rezygisk:
+	chmod +x scripts/build-rezygisk-h8q.sh scripts/deploy-rezygisk-h8q.sh \
+	  scripts/prepare-rezygisk-on-device.sh scripts/deploy-rezygisk-on-device.sh
+	scripts/build-rezygisk-h8q.sh
 
 all: $(OUT)
 

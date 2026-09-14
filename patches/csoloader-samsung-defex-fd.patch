@@ -1,0 +1,221 @@
+diff --git a/include/csoloader.h b/include/csoloader.h
+index 3f3ea06..c35507f 100644
+--- a/include/csoloader.h
++++ b/include/csoloader.h
+@@ -17,6 +17,9 @@ struct csoloader {
+ /* INFO: Load a library to memory and link it */
+ bool csoloader_load(struct csoloader *lib, const char *lib_path);
+ 
++/* INFO: Load from an already-open descriptor while retaining lib_path for diagnostics */
++bool csoloader_load_fd(struct csoloader *lib, const char *lib_path, int fd);
++
+ /* INFO: Unload the library and free all related resources */
+ bool csoloader_unload(struct csoloader *lib);
+ 
+@@ -33,4 +36,4 @@ void csoloader_deinit(void);
+ }
+ #endif
+ 
+-#endif /* CSOLOADER_H */
+\ No newline at end of file
++#endif /* CSOLOADER_H */
+diff --git a/include/elf_util.h b/include/elf_util.h
+index 3881293..3ac568b 100644
+--- a/include/elf_util.h
++++ b/include/elf_util.h
+@@ -99,6 +99,8 @@ void csoloader_elf_destroy(struct csoloader_elf *img);
+ 
+ struct csoloader_elf *csoloader_elf_create(const char *elf, void *base);
+ 
++struct csoloader_elf *csoloader_elf_create_fd(int fd, const char *elf, void *base);
++
+ ElfW(Addr) csoloader_elf_symb_offset(struct csoloader_elf *img, const char *name, unsigned char *sym_type);
+ 
+ ElfW(Addr) csoloader_elf_symb_address(struct csoloader_elf *img, const char *name);
+diff --git a/include/linker.h b/include/linker.h
+index bb11de2..3ba9611 100644
+--- a/include/linker.h
++++ b/include/linker.h
+@@ -47,6 +47,8 @@ struct linker {
+ 
+ void *linker_load_library_manually(const char *lib_path, struct loaded_dep *dep_info);
+ 
++void *linker_load_library_manually_fd(int fd, const char *lib_path, struct loaded_dep *dep_info);
++
+ bool linker_init(struct linker *linker, struct csoloader_elf *img);
+ 
+ void linker_destroy(struct linker *linker);
+diff --git a/src/csoloader.c b/src/csoloader.c
+index 61a0003..3052d14 100644
+--- a/src/csoloader.c
++++ b/src/csoloader.c
+@@ -29,16 +29,20 @@ extern int g_argc;
+ extern char **g_argv;
+ extern char **g_envp;
+ 
+-bool csoloader_load(struct csoloader *lib, const char *lib_path) {
++static bool csoloader_load_impl(struct csoloader *lib, const char *lib_path, int fd) {
+   struct loaded_dep dep_info = { 0 };
+-  void *map_start = linker_load_library_manually(lib_path, &dep_info);
++  void *map_start = fd < 0
++    ? linker_load_library_manually(lib_path, &dep_info)
++    : linker_load_library_manually_fd(fd, lib_path, &dep_info);
+   if (!map_start) {
+     LOGE("Failed to load library: %s", lib_path);
+ 
+     return false;
+   }
+ 
+-  struct csoloader_elf *elf_image = csoloader_elf_create(lib_path, map_start);
++  struct csoloader_elf *elf_image = fd < 0
++    ? csoloader_elf_create(lib_path, map_start)
++    : csoloader_elf_create_fd(fd, lib_path, map_start);
+   if (!elf_image) {
+     LOGE("Failed to create ELF image for %s", lib_path);
+ 
+@@ -81,6 +85,14 @@ bool csoloader_load(struct csoloader *lib, const char *lib_path) {
+   return true;
+ }
+ 
++bool csoloader_load(struct csoloader *lib, const char *lib_path) {
++  return csoloader_load_impl(lib, lib_path, -1);
++}
++
++bool csoloader_load_fd(struct csoloader *lib, const char *lib_path, int fd) {
++  return csoloader_load_impl(lib, lib_path, fd);
++}
++
+ bool csoloader_unload(struct csoloader *lib) {
+   linker_destroy(&lib->linker);
+ 
+@@ -153,4 +165,4 @@ void csoloader_deinit(void) {
+ 
+     return 0;
+   }
+-#endif
+\ No newline at end of file
++#endif
+diff --git a/src/elf_util.c b/src/elf_util.c
+index cff7daa..b88b9b0 100644
+--- a/src/elf_util.c
++++ b/src/elf_util.c
+@@ -169,7 +169,7 @@ void csoloader_elf_destroy(struct csoloader_elf *img) {
+   free(img);
+ }
+ 
+-struct csoloader_elf *csoloader_elf_create(const char *elf, void *base) {
++static struct csoloader_elf *csoloader_elf_create_fd_impl(int source_fd, const char *elf, void *base) {
+   struct csoloader_elf *img = (struct csoloader_elf *)calloc(1, sizeof(struct csoloader_elf));
+   if (!img) {
+     LOGE("Failed to allocate memory for struct csoloader_elf");
+@@ -205,9 +205,9 @@ struct csoloader_elf *csoloader_elf_create(const char *elf, void *base) {
+     }
+   }
+ 
+-  int fd = open(img->elf, O_RDONLY | O_CLOEXEC);
++  int fd = fcntl(source_fd, F_DUPFD_CLOEXEC, 0);
+   if (fd < 0) {
+-    LOGE("failed to open %s", img->elf);
++    LOGE("failed to duplicate descriptor for %s", img->elf);
+ 
+     csoloader_elf_destroy(img);
+ 
+@@ -247,7 +247,7 @@ struct csoloader_elf *csoloader_elf_create(const char *elf, void *base) {
+ 
+   size_t total_read = 0;
+   while (total_read < (size_t)img->size) {
+-    ssize_t n = TEMP_FAILURE_RETRY(read(fd, (char *)img->header + total_read, img->size - total_read));
++    ssize_t n = TEMP_FAILURE_RETRY(pread(fd, (char *)img->header + total_read, img->size - total_read, total_read));
+     if (n < 0) {
+       LOGE("read() failed for %s: %s", img->elf, strerror(errno));
+ 
+@@ -636,6 +636,24 @@ struct csoloader_elf *csoloader_elf_create(const char *elf, void *base) {
+   return img;
+ }
+ 
++struct csoloader_elf *csoloader_elf_create(const char *elf, void *base) {
++  int fd = open(elf, O_RDONLY | O_CLOEXEC);
++  if (fd < 0) {
++    LOGE("failed to open %s", elf);
++
++    return NULL;
++  }
++
++  struct csoloader_elf *img = csoloader_elf_create_fd_impl(fd, elf, base);
++  close(fd);
++
++  return img;
++}
++
++struct csoloader_elf *csoloader_elf_create_fd(int fd, const char *elf, void *base) {
++  return csoloader_elf_create_fd_impl(fd, elf, base);
++}
++
+ static bool load_symtabs(struct csoloader_elf *img) {
+   if (img->symtabs_) return true;
+ 
+diff --git a/src/linker.c b/src/linker.c
+index ecb66a7..e09ca1d 100644
+--- a/src/linker.c
++++ b/src/linker.c
+@@ -685,12 +685,12 @@ static int _linker_load_one_segment(int fd, ElfW(Phdr) *phdr, ElfW(Addr) bias, o
+   return 0;
+ }
+ 
+-void *linker_load_library_manually(const char *lib_path, struct loaded_dep *out) {
++static void *linker_load_library_manually_fd_impl(int source_fd, const char *lib_path, struct loaded_dep *out) {
+   _linker_internal_init();
+ 
+-  int fd = open(lib_path, O_RDONLY | O_CLOEXEC);
++  int fd = fcntl(source_fd, F_DUPFD_CLOEXEC, 0);
+   if (fd < 0) {
+-    PLOGE("open %s", lib_path);
++    PLOGE("duplicate descriptor for %s", lib_path);
+ 
+     return NULL;
+   }
+@@ -796,6 +796,24 @@ void *linker_load_library_manually(const char *lib_path, struct loaded_dep *out)
+   return base;
+ }
+ 
++void *linker_load_library_manually(const char *lib_path, struct loaded_dep *out) {
++  int fd = open(lib_path, O_RDONLY | O_CLOEXEC);
++  if (fd < 0) {
++    PLOGE("open %s", lib_path);
++
++    return NULL;
++  }
++
++  void *base = linker_load_library_manually_fd_impl(fd, lib_path, out);
++  close(fd);
++
++  return base;
++}
++
++void *linker_load_library_manually_fd(int fd, const char *lib_path, struct loaded_dep *out) {
++  return linker_load_library_manually_fd_impl(fd, lib_path, out);
++}
++
+ struct linker_symbol_info {
+   void *addr;
+   struct csoloader_elf *img;
+@@ -2121,7 +2139,11 @@ bool linker_link(struct linker *linker) {
+ 
+     struct loaded_dep *current_dep = &linker->dependencies[linker->dep_count];
+ 
+-    struct csoloader_elf *check_img = csoloader_elf_create(lib_name, NULL);
++    /* Use the resolved path for both the dl_iterate_phdr match and ELF metadata.
++       Passing only the soname makes the metadata open fail, which incorrectly
++       causes an already-loaded system library (including libc) to be mapped a
++       second time. */
++    struct csoloader_elf *check_img = csoloader_elf_create(lib_full_path, NULL);
+     if (check_img && check_img->base) {
+       current_dep->img = check_img;
+       current_dep->is_manual_load = false;
+@@ -2345,4 +2367,4 @@ void linker_deinit(void) {
+ 
+   pthread_mutex_destroy(&g_tls_mutex);
+   g_tls_mutex = (pthread_mutex_t)PTHREAD_MUTEX_INITIALIZER;
+-}
+\ No newline at end of file
++}

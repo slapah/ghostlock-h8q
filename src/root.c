@@ -72,11 +72,21 @@ int do_root_stage() {
     _exit(12);
   }
   if (loader == 0) {
-    /* Let the downloaded target-specific ksud select its embedded module
-     * from the running kernel.  Hard-coding android15-6.6 made the shared
-     * loader path unusable for exact 6.1 payloads such as E2S. */
-    execl(LOGCAT_PATH, "logcat", "late-load", "--package-name",
-        "me.weishu.kernelsu", (char *)NULL);
+    /* YukiSU's ksud selects its embedded <kmi>_kernelsu.ko for the running
+     * kernel; hard-coding a KMI made the shared loader path unusable for
+     * exact payloads such as E2S.  YukiSU's late-load takes no --package-name
+     * (the kernel matches the manager by trusted APK signature via the throne
+     * tracker); --allow-shell loads the LKM with allow_shell=1 so this shell
+     * receives uid 0 before a signed YukiSU manager (com.anatdx.yukisu) is
+     * installed.  Override the single flag with GHOSTLOCK_LATE_LOAD_ARGS. */
+    const char *late_args = get_env_default("GHOSTLOCK_LATE_LOAD_ARGS",
+        "--allow-shell");
+    /* YukiSU's ksud dispatches by argv[0] basename (main.cpp): a base other
+     * than ksud/magiskboot/bootctl/resetprop/su is delegated to the embedded
+     * busybox, which exits 127 on "late-load". Pass argv[0]="ksud" so the
+     * bind-mounted /system/bin/logcat path still bypasses DEFEX but routes to
+     * ksud's own cli_run -> late-load command. */
+    execl(LOGCAT_PATH, "ksud", "late-load", late_args, (char *)NULL);
     android_log("late-load: exec: %s\n", strerror(errno));
     _exit(12);
   }

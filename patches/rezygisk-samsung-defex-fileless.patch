@@ -1,0 +1,750 @@
+diff --git a/loader/src/common/daemon.c b/loader/src/common/daemon.c
+index dab62aa..c97dd32 100644
+--- a/loader/src/common/daemon.c
++++ b/loader/src/common/daemon.c
+@@ -111,6 +111,8 @@ uint32_t rezygiskd_get_process_flags(uid_t uid, const char *const process) {
+ }
+ 
+ void rezygiskd_get_info(struct rezygisk_info *info) {
++  memset(info, 0, sizeof(*info));
++
+   int fd = rezygiskd_connect(1);
+   if (fd == -1) {
+     PLOGE("connection to ReZygiskd");
+@@ -224,16 +226,14 @@ void rezygiskd_get_info(struct rezygisk_info *info) {
+ }
+ 
+ void free_rezygisk_info(struct rezygisk_info *info) {
+-  for (size_t i = 0; i < info->modules.modules_count; i++) {
+-    free(info->modules.modules[i]);
+-  }
+-
+-  free(info->modules.modules);
+-  info->modules.modules = NULL;
+-  info->modules.modules_count = 0;
++  free_modules(&info->modules);
+ }
+ 
+ bool rezygiskd_read_modules(struct zygisk_modules *modules) {
++  modules->modules = NULL;
++  modules->fds = NULL;
++  modules->modules_count = 0;
++
+   int fd = rezygiskd_connect(1);
+   if (fd == -1) {
+     PLOGE("connection to ReZygiskd");
+@@ -246,16 +246,25 @@ bool rezygiskd_read_modules(struct zygisk_modules *modules) {
+   size_t len = 0;
+   safe_read(read_size_t(fd, &len), "modules count", return false);
+ 
+-  modules->modules = malloc(len * sizeof(char *));
+-  if (!modules->modules) {
++  modules->modules = calloc(len, sizeof(char *));
++  modules->fds = malloc(len * sizeof(int));
++  if (len != 0 && (!modules->modules || !modules->fds)) {
+     PLOGE("allocating modules name memory");
+ 
++    free(modules->modules);
++    free(modules->fds);
++    modules->modules = NULL;
++    modules->fds = NULL;
+     close(fd);
+ 
+     return false;
+   }
+   modules->modules_count = len;
+ 
++  for (size_t i = 0; i < len; i++) {
++    modules->fds[i] = -1;
++  }
++
+   for (size_t i = 0; i < len; i++) {
+     char *lib_path = read_string(fd);
+     if (!lib_path) {
+@@ -270,6 +279,19 @@ bool rezygiskd_read_modules(struct zygisk_modules *modules) {
+     }
+ 
+     modules->modules[i] = lib_path;
++
++    int lib_fd = read_fd(fd);
++    if (lib_fd == -1) {
++      PLOGE("reading module file descriptor");
++
++      free_modules(modules);
++
++      close(fd);
++
++      return false;
++    }
++
++    modules->fds[i] = lib_fd;
+   }
+ 
+   close(fd);
+@@ -280,10 +302,13 @@ bool rezygiskd_read_modules(struct zygisk_modules *modules) {
+ void free_modules(struct zygisk_modules *modules) {
+   for (size_t i = 0; i < modules->modules_count; i++) {
+     free(modules->modules[i]);
++    if (modules->fds && modules->fds[i] >= 0) close(modules->fds[i]);
+   }
+ 
+   free(modules->modules);
++  free(modules->fds);
+   modules->modules = NULL;
++  modules->fds = NULL;
+   modules->modules_count = 0;
+ }
+ 
+diff --git a/loader/src/include/daemon.h b/loader/src/include/daemon.h
+index eaef801..aa0fd55 100644
+--- a/loader/src/include/daemon.h
++++ b/loader/src/include/daemon.h
+@@ -19,6 +19,7 @@ enum rezygiskd_actions {
+ 
+ struct zygisk_modules {
+   char **modules;
++  int *fds;
+   size_t modules_count;
+ };
+ 
+diff --git a/loader/src/injector/hook.c b/loader/src/injector/hook.c
+index c72d7ee..3d706e9 100644
+--- a/loader/src/injector/hook.c
++++ b/loader/src/injector/hook.c
+@@ -951,7 +951,7 @@ static bool load_modules_only(void) {
+   for (size_t i = 0; i < ms.modules_count; i++) {
+     const char *lib_path = ms.modules[i];
+ 
+-    if (!csoloader_load(&zygisk_modules[zygisk_module_length].lib, lib_path)) {
++    if (!csoloader_load_fd(&zygisk_modules[zygisk_module_length].lib, lib_path, ms.fds[i])) {
+       LOGE("Failed to load module [%s]", lib_path);
+ 
+       /* INFO: In case a module failed to load, update the list of available modules
+diff --git a/loader/src/ptracer/monitor.c b/loader/src/ptracer/monitor.c
+index eb4af00..3b0c2aa 100644
+--- a/loader/src/ptracer/monitor.c
++++ b/loader/src/ptracer/monitor.c
+@@ -400,7 +400,7 @@ void rezygiskd_listener_stop() {
+   monitor_sock_fd = -1;
+ }
+ 
+-#define MAX_RETRY_COUNT 5
++#define MAX_RETRY_COUNT 1
+ 
+ #define CREATE_ZYGOTE_START_COUNTER(abi)             \
+   struct timespec last_zygote##abi = {               \
+diff --git a/loader/src/ptracer/remote_csoloader.c b/loader/src/ptracer/remote_csoloader.c
+index 478de34..b1de70b 100644
+--- a/loader/src/ptracer/remote_csoloader.c
++++ b/loader/src/ptracer/remote_csoloader.c
+@@ -36,15 +36,57 @@ static uintptr_t page_end(uintptr_t addr, size_t page_size) {
+   return ALIGN_DOWN(addr + page_size - 1, page_size);
+ }
+ 
+-static long remote_mmap_offset_arg(off_t file_offset, size_t page_size) {
+-  /* INFO: mmap2 needs the offset in page units, unlike mmap */
+-  #ifdef __LP64__
+-    (void) page_size;
+-
+-    return file_offset;
+-  #else
+-    return (long)(file_offset / (off_t)page_size);
+-  #endif
++static bool copy_file_range_to_remote(int pid, int fd, off_t file_offset,
++                                      uintptr_t remote_address, size_t length) {
++  const size_t max_chunk = 64 * 1024;
++  size_t buffer_size = length < max_chunk ? length : max_chunk;
++  unsigned char *buffer = malloc(buffer_size ? buffer_size : 1);
++  if (!buffer) return false;
++
++  size_t copied = 0;
++  while (copied < length) {
++    size_t chunk = length - copied;
++    if (chunk > buffer_size) chunk = buffer_size;
++    if (!read_loop_offset(fd, buffer, chunk, file_offset + (off_t)copied) ||
++        write_proc(pid, remote_address + copied, buffer, chunk) !=
++          (ssize_t)chunk) {
++      LOGE("Failed to copy ELF bytes into remote anonymous memory");
++      free(buffer);
++
++      return false;
++    }
++    copied += chunk;
++  }
++
++  free(buffer);
++
++  return true;
++}
++
++static bool zero_remote_range(int pid, uintptr_t remote_address,
++                              size_t length) {
++  const size_t max_chunk = 64 * 1024;
++  size_t buffer_size = length < max_chunk ? length : max_chunk;
++  unsigned char *buffer = calloc(buffer_size ? buffer_size : 1, 1);
++  if (!buffer) return false;
++
++  size_t cleared = 0;
++  while (cleared < length) {
++    size_t chunk = length - cleared;
++    if (chunk > buffer_size) chunk = buffer_size;
++    if (write_proc(pid, remote_address + cleared, buffer, chunk) !=
++        (ssize_t)chunk) {
++      LOGE("Failed to clear remote ELF BSS bytes");
++      free(buffer);
++
++      return false;
++    }
++    cleared += chunk;
++  }
++
++  free(buffer);
++
++  return true;
+ }
+ 
+ /* INFO: Parse ELF headers and compute the total mapping size for PT_LOAD segments. */
+@@ -685,8 +727,6 @@ bool remote_csoloader_load_and_resolve_entry(int pid, struct user_regs_struct *r
+                                              struct maps_info *remote_map, struct maps_info *local_map,
+                                              const char *lib_path, uintptr_t *out_base,
+                                              size_t *out_total_size, uintptr_t *out_entry) {
+-  struct user_regs_struct regs_saved = *regs;
+-
+   long page_size_long = sysconf(_SC_PAGESIZE);
+   if (page_size_long <= 0) {
+     LOGE("sysconf(_SC_PAGESIZE) failed");
+@@ -731,72 +771,16 @@ bool remote_csoloader_load_and_resolve_entry(int pid, struct user_regs_struct *r
+     return false;
+   }
+ 
+-  size_t path_len = strlen(lib_path) + 1;
+-  uintptr_t remote_path = regs_saved.REG_SP - ALIGN_UP(path_len, 16);
+-  if (write_proc(pid, remote_path, lib_path, path_len) != (ssize_t)path_len) {
+-    LOGE("Failed to write remote path string to stack");
+-
+-    free(phdr);
+-    close(fd);
+-
+-    return false;
+-  }
+-
+-  /* INFO: Ensure remote_call's own stack usage stays below our string */
+-  regs->REG_SP = remote_path;
+-
+   long args[6];
+-  args[0] = AT_FDCWD;
+-  args[1] = (long)remote_path;
+-  args[2] = O_RDONLY | O_CLOEXEC;
+-  args[3] = 0;
+-
+-  long remote_fd = remote_syscall(pid, regs, syscall_gadget, SYS_openat, args, 4);
+-  if (remote_fd < 0) {
+-    LOGE("Failed to open remote file: %s (%ld)", lib_path, remote_fd);
+-
+-    free(phdr);
+-    close(fd);
+-
+-    return false;
+-  }
+-
+-  void *remote_path_zerod = calloc(1, ALIGN_UP(path_len, 16));
+-  if (!remote_path_zerod) {
+-    LOGE("Failed to allocate memory for zeroed path");
+-
+-    args[0] = remote_fd;
+-    remote_syscall(pid, regs, syscall_gadget, SYS_close, args, 1);
+-
+-    free(phdr);
+-    close(fd);
+-
+-    return false;
+-  }
+-
+-  if (write_proc(pid, remote_path, remote_path_zerod, ALIGN_UP(path_len, 16)) != (ssize_t)ALIGN_UP(path_len, 16)) {
+-    LOGE("Failed to zero remote path string on stack");
+-
+-    free(remote_path_zerod);
+-
+-    args[0] = remote_fd;
+-    remote_syscall(pid, regs, syscall_gadget, SYS_close, args, 1);
+-
+-    free(phdr);
+-    close(fd);
+-
+-    return false;
+-  }
+-
+-  free(remote_path_zerod);
+ 
+   /* INFO: Request an LP64 base 4GiB+ so the mapping starts high and stays
+              farther from the areas where the target process is more likely to
+-             create VMAs later. */
++             create VMAs later. Populate anonymous memory from the capable
++             tracer instead of making Samsung's uid-0 zygote open /data. */
+   uintptr_t min_addr = sizeof(void *) == 8 ? 0x100000000ULL : (uintptr_t)0;
+   args[0] = (long)min_addr;
+   args[1] = (long)map_size;
+-  args[2] = PROT_NONE;
++  args[2] = PROT_READ | PROT_WRITE;
+   args[3] = MAP_PRIVATE | MAP_ANONYMOUS;
+   args[4] = -1;
+   args[5] = 0;
+@@ -805,10 +789,6 @@ bool remote_csoloader_load_and_resolve_entry(int pid, struct user_regs_struct *r
+   if (!remote_base || remote_base == (uintptr_t)MAP_FAILED) {
+     LOGE("remote mmap reserve failed: %p", (void *)remote_base);
+ 
+-
+-    args[0] = remote_fd;
+-    remote_syscall(pid, regs, syscall_gadget, SYS_close, args, 1);
+-
+     free(phdr);
+     close(fd);
+ 
+@@ -825,10 +805,6 @@ bool remote_csoloader_load_and_resolve_entry(int pid, struct user_regs_struct *r
+ 
+     remote_syscall(pid, regs, syscall_gadget, SYS_munmap, args, 2);
+ 
+-    args[0] = remote_fd;
+-
+-    remote_syscall(pid, regs, syscall_gadget, SYS_close, args, 1);
+-
+     free(phdr);
+     close(fd);
+ 
+@@ -847,7 +823,9 @@ bool remote_csoloader_load_and_resolve_entry(int pid, struct user_regs_struct *r
+ 
+   size_t segs_count = 0;
+ 
+-  /* INFO: Map non-writable PT_LOAD from file */
++  /* INFO: Copy each PT_LOAD directly from the capable tracer. The zygote
++             never opens the module path, which avoids Samsung DEFEX's
++             immutable-root check on files stored under /data. */
+   for (int i = 0; i < eh.e_phnum; i++) {
+     if (phdr[i].p_type != PT_LOAD) continue;
+ 
+@@ -856,134 +834,37 @@ bool remote_csoloader_load_and_resolve_entry(int pid, struct user_regs_struct *r
+     uintptr_t seg_end = (uintptr_t)phdr[i].p_vaddr + (uintptr_t)phdr[i].p_memsz + load_bias;
+     uintptr_t seg_page_end = page_end(seg_end, page_size);
+     size_t seg_page_len = (size_t)(seg_page_end - seg_page);
++    uintptr_t map_start = remote_base;
++    uintptr_t map_end = remote_base + map_size;
++    if (phdr[i].p_filesz > phdr[i].p_memsz ||
++        seg_page < map_start || seg_page_end > map_end ||
++        seg_page_end < seg_page) {
++      LOGE("Invalid PT_LOAD range for phdr %d", i);
++      free(phdr);
++      close(fd);
+ 
+-    bool is_writable = (phdr[i].p_flags & PF_W) != 0;
+-
+-    if (is_writable) {
+-      off_t seg_offset = (off_t)phdr[i].p_offset;
+-      off_t file_page_offset = (off_t)page_start((uintptr_t)seg_offset, page_size);
+-      uintptr_t file_end = (uintptr_t)phdr[i].p_vaddr + (uintptr_t)phdr[i].p_filesz + load_bias;
+-      uintptr_t file_page_end = page_end(file_end, page_size);
+-
+-      if (phdr[i].p_filesz > 0) {
+-
+-        size_t file_map_len = (size_t)(file_page_end - seg_page);
+-        args[0] = (long)seg_page;
+-        args[1] = (long)file_map_len;
+-        args[2] = PROT_READ | PROT_WRITE;
+-        args[3] = MAP_FIXED | MAP_PRIVATE;
+-        args[4] = remote_fd;
+-        args[5] = remote_mmap_offset_arg(file_page_offset, page_size);
+-
+-        uintptr_t seg_map = (uintptr_t)remote_syscall(pid, regs, syscall_gadget, SYS_mmap, args, 6);
+-        if (!seg_map || seg_map == (uintptr_t)MAP_FAILED) {
+-          LOGE("remote mmap writable file-backed segment failed for phdr %d", i);
+-
+-
+-          args[0] = remote_fd;
+-
+-          remote_syscall(pid, regs, syscall_gadget, SYS_close, args, 1);
+-          free(phdr);
+-          close(fd);
+-
+-          return false;
+-        }
+-
+-        /* INFO: Zero-fill the tail of the last page (p_memsz - p_filesz within page). */
+-        if (file_page_end > file_end) {
+-          size_t tail_len = (size_t)(file_page_end - file_end);
+-          char *zeros = (char *)calloc(1, tail_len);
+-          if (!zeros || write_proc(pid, file_end, zeros, tail_len) != (ssize_t)tail_len) {
+-            LOGE("Failed to zero tail for phdr %d", i);
+-
+-            if (zeros) free(zeros);
+-            free(phdr);
+-            close(fd);
+-
+-            return false;
+-          }
+-
+-          free(zeros);
+-        }
+-      }
+-
+-      if (seg_page_end > file_page_end) {
+-
+-        args[0] = (long)file_page_end;
+-        args[1] = (long)(seg_page_end - file_page_end);
+-        args[2] = PROT_READ | PROT_WRITE;
+-        args[3] = MAP_FIXED | MAP_PRIVATE | MAP_ANONYMOUS;
+-        args[4] = -1;
+-        args[5] = 0;
+-
+-        uintptr_t bss_map = (uintptr_t)remote_syscall(pid, regs, syscall_gadget, SYS_mmap, args, 6);
+-        if (!bss_map || bss_map == (uintptr_t)MAP_FAILED) {
+-          LOGE("remote mmap bss segment failed for phdr %d", i);
+-
+-
+-          args[0] = remote_fd;
+-
+-          remote_syscall(pid, regs, syscall_gadget, SYS_close, args, 1);
+-          free(phdr);
+-          close(fd);
+-
+-          return false;
+-        }
+-      }
+-    } else {
+-      off_t seg_offset = (off_t)phdr[i].p_offset;
+-      off_t file_page_offset = (off_t)page_start((uintptr_t)seg_offset, page_size);
+-      uintptr_t file_end = (uintptr_t)phdr[i].p_vaddr + (uintptr_t)phdr[i].p_filesz + load_bias;
+-      uintptr_t file_page_end = page_end(file_end, page_size);
+-
+-      if (phdr[i].p_filesz > 0) {
+-
+-        size_t file_map_len = (size_t)(file_page_end - seg_page);
+-        args[0] = (long)seg_page;
+-        args[1] = (long)file_map_len;
+-        args[2] = PROT_READ | PROT_WRITE;
+-        args[3] = MAP_FIXED | MAP_PRIVATE;
+-        args[4] = remote_fd;
+-        args[5] = remote_mmap_offset_arg(file_page_offset, page_size);
+-
+-        uintptr_t seg_map = (uintptr_t)remote_syscall(pid, regs, syscall_gadget, SYS_mmap, args, 6);
+-        if (!seg_map || seg_map == (uintptr_t)MAP_FAILED) {
+-          LOGE("remote mmap file-backed segment failed for phdr %d", i);
+-
+-
+-          args[0] = remote_fd;
+-
+-          remote_syscall(pid, regs, syscall_gadget, SYS_close, args, 1);
+-          free(phdr);
+-          close(fd);
+-
+-          return false;
+-        }
+-      }
+-
+-      if (seg_page_end > file_page_end) {
+-
+-        args[0] = (long)file_page_end;
+-        args[1] = (long)(seg_page_end - file_page_end);
+-        args[2] = PROT_READ | PROT_WRITE;
+-        args[3] = MAP_FIXED | MAP_PRIVATE | MAP_ANONYMOUS;
+-        args[4] = -1;
+-        args[5] = 0;
+-
+-        uintptr_t bss_map = (uintptr_t)remote_syscall(pid, regs, syscall_gadget, SYS_mmap, args, 6);
+-        if (!bss_map || bss_map == (uintptr_t)MAP_FAILED) {
+-          LOGE("remote mmap bss segment failed for phdr %d", i);
++      return false;
++    }
+ 
++    if (phdr[i].p_filesz > 0 &&
++        !copy_file_range_to_remote(pid, fd, (off_t)phdr[i].p_offset,
++                                   seg_start,
++                                   (size_t)phdr[i].p_filesz)) {
++      free(phdr);
++      close(fd);
+ 
+-          args[0] = remote_fd;
++      return false;
++    }
+ 
+-          remote_syscall(pid, regs, syscall_gadget, SYS_close, args, 1);
+-          free(phdr);
+-          close(fd);
++    size_t bss_size = (size_t)(phdr[i].p_memsz - phdr[i].p_filesz);
++    if (bss_size > 0 &&
++        !zero_remote_range(pid,
++                           seg_start + (uintptr_t)phdr[i].p_filesz,
++                           bss_size)) {
++      free(phdr);
++      close(fd);
+ 
+-          return false;
+-        }
+-      }
++      return false;
+     }
+ 
+     /* INFO: Record segment info for later protection finalization */
+@@ -1001,11 +882,6 @@ bool remote_csoloader_load_and_resolve_entry(int pid, struct user_regs_struct *r
+     }
+   }
+ 
+-
+-  args[0] = remote_fd;
+-
+-  remote_syscall(pid, regs, syscall_gadget, SYS_close, args, 1);
+-
+   struct elf_dyn_info dinfo;
+   if (!elf_load_dyn_info(fd, &eh, phdr, &dinfo)) {
+     LOGE("Failed to load ELF dynamic info");
+@@ -1051,6 +927,22 @@ bool remote_csoloader_load_and_resolve_entry(int pid, struct user_regs_struct *r
+     return false;
+   }
+ 
++  /* INFO: Restore inaccessible guard holes before finalizing PT_LOAD pages. */
++  args[0] = (long)remote_base;
++  args[1] = (long)map_size;
++  args[2] = PROT_NONE;
++  long guard_ret = remote_syscall(pid, regs, syscall_gadget,
++                                  SYS_mprotect, args, 3);
++  if (guard_ret < 0) {
++    LOGE("Failed to protect remote ELF guard range: %ld", guard_ret);
++    free((void *)needed_paths);
++    elf_dyn_info_destroy(&dinfo);
++    free(phdr);
++    close(fd);
++
++    return false;
++  }
++
+   /* INFO: Finalize segment protections after relocations */
+   for (size_t i = 0; i < segs_count; i++) {
+ 
+diff --git a/zygiskd/src/root_impl/kernelsu.c b/zygiskd/src/root_impl/kernelsu.c
+index 8313283..7607be9 100644
+--- a/zygiskd/src/root_impl/kernelsu.c
++++ b/zygiskd/src/root_impl/kernelsu.c
+@@ -1,12 +1,16 @@
+ #include <string.h>
+ #include <errno.h>
++#include <stdint.h>
++#include <stdio.h>
+ 
+ #include <unistd.h>
+ #include <sys/ioctl.h>
+ #include <sys/prctl.h>
++#include <sys/socket.h>
+ #include <sys/stat.h>
+ #include <sys/syscall.h>
+ #include <sys/system_properties.h>
++#include <sys/un.h>
+ 
+ #include "../constants.h"
+ #include "../utils.h"
+@@ -63,6 +67,136 @@ struct ksu_get_hook_mode_cmd {
+ /* INFO: KernelSU-Next specific */
+ #define KSU_IOCTL_GET_HOOK_MODE _IOC(_IOC_READ, 'K', 98, 0)
+ 
++#define GHOSTLOCK_ROOT_SHELL_SOCKET "/data/local/tmp/ghostlock-v2.sock"
++#define GHOSTLOCK_ROOT_SHELL_KERNELCTL_REQUEST (UINT32_MAX - UINT32_C(1))
++#define GHOSTLOCK_KERNELCTL_MAGIC UINT32_C(0x474c4b43)
++#define GHOSTLOCK_KERNELCTL_VERSION UINT32_C(1)
++#define GHOSTLOCK_KERNELCTL_FEATURE_SET UINT32_C(4)
++#define GHOSTLOCK_KERNELCTL_UID_FLAGS UINT32_C(6)
++#define GHOSTLOCK_UID_FLAG_GRANTED_ROOT UINT32_C(1)
++#define GHOSTLOCK_UID_FLAG_SHOULD_UMOUNT UINT32_C(2)
++#define GHOSTLOCK_UID_FLAG_MANAGER UINT32_C(4)
++
++struct ghostlock_kernelctl_request {
++  uint32_t magic;
++  uint32_t version;
++  uint32_t operation;
++  uint32_t feature_id;
++  uint64_t value;
++  uint32_t manager_size;
++  unsigned char manager_hash[64];
++};
++
++struct ghostlock_kernelctl_response {
++  uint32_t magic;
++  uint32_t version;
++  int32_t status;
++  uint32_t supported;
++  uint64_t value;
++  uint32_t ksu_version;
++  uint32_t flags;
++  uint32_t features;
++  uint32_t uapi_version;
++};
++
++struct ghostlock_uid_cache {
++  uid_t uid;
++  uint32_t flags;
++  unsigned int remaining_reads;
++  bool valid;
++};
++
++static struct ghostlock_uid_cache ghostlock_cache;
++
++static bool ghostlock_write_full(int fd, const void *buffer, size_t length) {
++  const unsigned char *cursor = buffer;
++  while (length != 0) {
++    ssize_t count = write(fd, cursor, length);
++    if (count < 0) {
++      if (errno == EINTR) continue;
++      return false;
++    }
++    cursor += count;
++    length -= (size_t)count;
++  }
++  return true;
++}
++
++static bool ghostlock_read_full(int fd, void *buffer, size_t length) {
++  unsigned char *cursor = buffer;
++  while (length != 0) {
++    ssize_t count = read(fd, cursor, length);
++    if (count == 0) return false;
++    if (count < 0) {
++      if (errno == EINTR) continue;
++      return false;
++    }
++    cursor += count;
++    length -= (size_t)count;
++  }
++  return true;
++}
++
++static bool ghostlock_exchange(
++    uint32_t operation, uint32_t feature_id, uint64_t value,
++    struct ghostlock_kernelctl_response *response) {
++  int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
++  if (fd < 0) return false;
++
++  struct sockaddr_un address = {0};
++  address.sun_family = AF_UNIX;
++  snprintf(address.sun_path, sizeof(address.sun_path), "%s",
++           GHOSTLOCK_ROOT_SHELL_SOCKET);
++  if (connect(fd, (struct sockaddr *)&address, sizeof(address)) != 0) {
++    close(fd);
++    return false;
++  }
++
++  uint32_t control = GHOSTLOCK_ROOT_SHELL_KERNELCTL_REQUEST;
++  struct ghostlock_kernelctl_request request = {
++    .magic = GHOSTLOCK_KERNELCTL_MAGIC,
++    .version = GHOSTLOCK_KERNELCTL_VERSION,
++    .operation = operation,
++    .feature_id = feature_id,
++    .value = value
++  };
++  bool ok =
++    ghostlock_write_full(fd, &control, sizeof(control)) &&
++    ghostlock_write_full(fd, &request, sizeof(request)) &&
++    ghostlock_read_full(fd, response, sizeof(*response)) &&
++    response->magic == GHOSTLOCK_KERNELCTL_MAGIC &&
++    response->version == GHOSTLOCK_KERNELCTL_VERSION;
++  close(fd);
++  if (!ok) return false;
++  if (response->status != 0) {
++    errno = -response->status;
++    return false;
++  }
++  return true;
++}
++
++static bool ghostlock_get_uid_flags(uid_t uid, uint32_t *flags) {
++  if (ghostlock_cache.valid && ghostlock_cache.uid == uid &&
++      ghostlock_cache.remaining_reads != 0) {
++    ghostlock_cache.remaining_reads--;
++    *flags = ghostlock_cache.flags;
++    return true;
++  }
++
++  struct ghostlock_kernelctl_response response = {0};
++  if (!ghostlock_exchange(
++          GHOSTLOCK_KERNELCTL_UID_FLAGS, 0, uid, &response)) {
++    ghostlock_cache.valid = false;
++    return false;
++  }
++  ghostlock_cache.uid = uid;
++  ghostlock_cache.flags = response.flags;
++  ghostlock_cache.remaining_reads = 2;
++  ghostlock_cache.valid = true;
++  *flags = ghostlock_cache.flags;
++  return true;
++}
++
+ static enum kernelsu_variants variant = KOfficial;
+ 
+ static int ksu_fd = -1;
+@@ -149,9 +283,15 @@ void ksu_get_existence(struct root_impl_state *state) {
+ 
+   /* INFO: Tell KernelSU to not umount, and let us handle it */
+   if (ioctl(ksu_fd, KSU_IOCTL_SET_FEATURE, &cmd) == -1) {
+-    LOGW("Failed to ioctl KSU_IOCTL_SET_FEATURE: %s\n", strerror(errno));
+-
+-    /* INFO: Not a fatal error, just log and continue */
++    struct ghostlock_kernelctl_response response = {0};
++    if (!ghostlock_exchange(
++            GHOSTLOCK_KERNELCTL_FEATURE_SET, cmd.feature_id,
++            cmd.value, &response)) {
++      LOGW("Failed to set KernelSU feature through GhostLock: %s\n",
++           strerror(errno));
++
++      /* INFO: Not a fatal error, just log and continue */
++    }
+   }
+ 
+   struct ksu_get_hook_mode_cmd hook_mode_cmd = { 0 };
+@@ -179,6 +319,11 @@ bool ksu_uid_granted_root(uid_t uid) {
+     .granted = 0
+   };
+ 
++  uint32_t ghostlock_flags;
++  if (ghostlock_get_uid_flags(uid, &ghostlock_flags)) {
++    return (ghostlock_flags & GHOSTLOCK_UID_FLAG_GRANTED_ROOT) != 0;
++  }
++
+   if (ioctl(ksu_fd, KSU_IOCTL_UID_GRANTED_ROOT, &cmd) == -1) {
+     LOGE("Failed to ioctl KSU_IOCTL_UID_GRANTED_ROOT: %s\n", strerror(errno));
+ 
+@@ -204,6 +349,11 @@ bool ksu_uid_should_umount(uid_t uid) {
+     .should_umount = 0
+   };
+ 
++  uint32_t ghostlock_flags;
++  if (ghostlock_get_uid_flags(uid, &ghostlock_flags)) {
++    return (ghostlock_flags & GHOSTLOCK_UID_FLAG_SHOULD_UMOUNT) != 0;
++  }
++
+   if (ioctl(ksu_fd, KSU_IOCTL_UID_SHOULD_UMOUNT, &cmd) == -1) {
+     LOGE("Failed to ioctl KSU_IOCTL_UID_SHOULD_UMOUNT: %s\n", strerror(errno));
+ 
+@@ -243,6 +393,11 @@ bool ksu_uid_is_manager(uid_t uid) {
+   }
+ 
+   /* INFO: If it uses ioctl, it already has support to get manager UID operation */
++  uint32_t ghostlock_flags;
++  if (ghostlock_get_uid_flags(uid, &ghostlock_flags)) {
++    return (ghostlock_flags & GHOSTLOCK_UID_FLAG_MANAGER) != 0;
++  }
++
+   struct ksu_get_manager_uid_cmd cmd;
+   if (ioctl(ksu_fd, KSU_IOCTL_GET_MANAGER_UID, &cmd) == -1) {
+     LOGE("Failed to ioctl KSU_IOCTL_GET_MANAGER_UID: %s\n", strerror(errno));
+diff --git a/zygiskd/src/zygiskd.c b/zygiskd/src/zygiskd.c
+index 69c6063..9e0fa5b 100644
+--- a/zygiskd/src/zygiskd.c
++++ b/zygiskd/src/zygiskd.c
+@@ -478,6 +478,12 @@ void zygiskd_start(char *restrict argv[]) {
+ 
+             break;
+           }
++
++          if (write_fd(client_fd, context.modules[i].lib_fd) == -1) {
++            LOGE("Failed writing module file descriptor.");
++
++            break;
++          }
+         }
+ 
+         break;

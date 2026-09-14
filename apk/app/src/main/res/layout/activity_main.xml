@@ -25,7 +25,7 @@
         android:id="@+id/runButton"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:text="Run exploit + install KernelSU" />
+        android:text="Run exploit + install YukiSU" />
 
     <ScrollView
         android:id="@+id/logScroll"

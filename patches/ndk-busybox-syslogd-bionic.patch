@@ -1,0 +1,60 @@
+diff --git a/sysklogd/syslogd_and_logger.c b/sysklogd/syslogd_and_logger.c
+index 94d8273b6..1255acb25 100644
+--- a/sysklogd/syslogd_and_logger.c
++++ b/sysklogd/syslogd_and_logger.c
+@@ -12,6 +12,55 @@
+ #define SYSLOG_NAMES_CONST
+ #include <syslog.h>
+ 
++#if defined(__ANDROID__)
++/* bionic's <syslog.h> does not provide the glibc SYSLOG_NAMES feature
++ * (CODE/prioritynames/facilitynames). Supply them here so syslogd.c
++ * (included below) links on Android/NDK. */
++typedef struct _code {
++	const char *c_name;
++	int c_val;
++} CODE;
++#define INTERNAL_NOPRI 0x10
++#define INTERNAL_MARK LOG_MAKEPRI(LOG_NFACILITIES, 0)
++static const CODE prioritynames[] = {
++	{ "alert", LOG_ALERT },
++	{ "crit", LOG_CRIT },
++	{ "debug", LOG_DEBUG },
++	{ "emerg", LOG_EMERG },
++	{ "err", LOG_ERR },
++	{ "info", LOG_INFO },
++	{ "none", INTERNAL_NOPRI },
++	{ "notice", LOG_NOTICE },
++	{ "warning", LOG_WARNING },
++	{ NULL, -1 }
++};
++static const CODE facilitynames[] = {
++	{ "auth", LOG_AUTH },
++	{ "authpriv", LOG_AUTHPRIV },
++	{ "cron", LOG_CRON },
++	{ "daemon", LOG_DAEMON },
++	{ "ftp", LOG_FTP },
++	{ "kern", LOG_KERN },
++	{ "lpr", LOG_LPR },
++	{ "mail", LOG_MAIL },
++	{ "mark", INTERNAL_MARK },
++	{ "news", LOG_NEWS },
++	{ "security", LOG_AUTH },
++	{ "syslog", LOG_SYSLOG },
++	{ "user", LOG_USER },
++	{ "uucp", LOG_UUCP },
++	{ "local0", LOG_LOCAL0 },
++	{ "local1", LOG_LOCAL1 },
++	{ "local2", LOG_LOCAL2 },
++	{ "local3", LOG_LOCAL3 },
++	{ "local4", LOG_LOCAL4 },
++	{ "local5", LOG_LOCAL5 },
++	{ "local6", LOG_LOCAL6 },
++	{ "local7", LOG_LOCAL7 },
++	{ NULL, -1 }
++};
++#endif
++
+ #if 0
+ /* For the record: with SYSLOG_NAMES <syslog.h> defines
+  * (not declares) the following:
