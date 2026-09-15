@@ -18,6 +18,18 @@ atomic_int punch_consume_stop;
 atomic_int consumer_calls;
 atomic_int consumer_success;
 atomic_int current_phase;
+atomic_int fops_shot;
+
+int fops_shot_delay_usec(void) {
+  /* Delay ROTATION across retry shots: shot 0 keeps the hardware-validated
+   * 100 ms settle; retries rotate through a bounded spread rather than
+   * repeating one stale delay. */
+  static const int rotation_usec[] = {
+    100000, 80000, 120000, 60000, 140000, 40000, 160000, 20000,
+  };
+  int shot = atomic_fetch_add(&fops_shot, 1);
+  return rotation_usec[shot % (int)(sizeof(rotation_usec) / sizeof(rotation_usec[0]))];
+}
 
 void *waiter_thread(void *arg __attribute__((unused))) {
   disable_rseq_for_thread();
@@ -81,9 +93,12 @@ void *owner_thread(void *arg __attribute__((unused))) {
   futex_op(&f_pi_chain, FUTEX_LOCK_PI, 0, NULL, NULL, 0);
   atomic_store(&owner_chain_done, 1);
 
-  for (;;) {
+  /* Shared FOPS retry state: a landed write (route_verified=1) terminates
+   * this thread instead of holding the PI locks into the next shot. */
+  while (!atomic_load(&route_verified)) {
     sleep(1);
   }
+  return NULL;
 }
 
 void *consumer_thread(void *arg __attribute__((unused))) {
@@ -148,7 +163,9 @@ void run_main_route_threads(void) {
     usleep(1000);
   }
 
-  usleep(100000);
+  int shot_delay = fops_shot_delay_usec();
+  pr_info("main route shot delay=%d usec\n", shot_delay);
+  usleep((useconds_t)shot_delay);
   errno = 0;
   long requeue_ret = futex_op(&f_wait, FUTEX_CMP_REQUEUE_PI, 1, (void *)1, &f_pi_target, 0);
   int requeue_errno = errno;

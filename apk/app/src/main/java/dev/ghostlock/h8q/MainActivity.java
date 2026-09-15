@@ -113,7 +113,10 @@ public class MainActivity extends AppCompatActivity {
             int code = p.waitFor();
             log("[*] payload sh exited (" + code + ")");
             log("[*] Watching logcat for GHOSTLOCK — a line reading uid=0(root)\n" +
-                    "    means success. If nothing appears, see the notes below.");
+                    "    means success. If the phone REBOOTS, that is a kernel panic,\n" +
+                    "    not success: afterwards run\n" +
+                    "    adb pull /data/local/tmp/ghostlock-markers.log\n" +
+                    "    and read the last line — it names the phase that panicked.");
         } catch (Throwable t) {
             log("[!] " + t.getClass().getSimpleName() + ": " + t.getMessage());
         } finally {

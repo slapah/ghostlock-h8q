@@ -96,7 +96,7 @@ static int do_io_submit(void) {
   return fail;
 }
 
-int route_verified = 0;
+atomic_int route_verified = 0;
 void prime_fake_lock(void) {
   route_verified = 0;
 

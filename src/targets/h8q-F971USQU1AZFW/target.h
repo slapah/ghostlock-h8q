@@ -12,6 +12,15 @@
 #define P0_PAGE_OFFSET   0xffffff8000000000ULL
 #define P0_PHYS_OFFSET   0x80000000ULL
 
+/* Root-My-Galaxy h8q application payload flags (validated physical-alias
+ * baseline): derive the KASLR slide from Tracefs; kernel data writes go
+ * through the physical-load alias (not the canonical direct map); the
+ * physical P0 oracle is the explicit fallback; bounded FOPS retry budget. */
+#define APP_TRACEFS_SLIDE 1
+#define APP_TRACEFS_PHYS_ALIAS_DATA 1
+#define APP_PHYS_P0_ORACLE 1
+#define APP_FOPS_RETRY_BUDGET 8
+
 #ifdef ANDROID_TARGET
 #define P0_KERNEL_PHYS_LOAD 0xc7800000ULL
 #define PIPE_OVERWRITE_TARGET "/vendor/bin/vendor_modprobe.sh"
