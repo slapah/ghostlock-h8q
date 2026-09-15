@@ -71,6 +71,20 @@ static void mark(const char *fmt, ...) {
   dprintf(STDERR_FILENO, "[*] %s\n", line);
 }
 
+static const char *selinux_domain(void) {
+  static char buf[128];
+  int fd = open("/proc/self/attr/current", O_RDONLY | O_CLOEXEC);
+  if (fd < 0)
+    return "?";
+  ssize_t n = read(fd, buf, sizeof(buf) - 1);
+  close(fd);
+  if (n <= 0)
+    return "?";
+  buf[n] = '\0';
+  buf[strcspn(buf, "\r\n")] = '\0';
+  return buf;
+}
+
 static int copy_file(const char *src, const char *dst, mode_t mode) {
   int in = open(src, O_RDONLY | O_CLOEXEC);
   if (in < 0)
@@ -164,11 +178,14 @@ static int do_late_load(void) {
     return 20;
   }
   mark("late-load ksud source: %s", src);
+  mark("late-load domain: %s", selinux_domain());
 
   /* ksud late-load stages its daemon from .ksud-stage, and the bind-mount
-   * exec below runs from KSUD_TMP. */
-  if (copy_file(src, KSUD_TMP, 0755) != 0) {
-    mark("late-load FAILED: promote ksud: %s", strerror(errno));
+   * exec below runs from KSUD_TMP. Never self-copy: on the dev path the
+   * source IS KSUD_TMP, and O_TRUNC on it would zero the only ksud. */
+  if (strcmp(src, KSUD_TMP) != 0 && copy_file(src, KSUD_TMP, 0755) != 0) {
+    mark("late-load FAILED: promote ksud %s -> %s: %s", src, KSUD_TMP,
+        strerror(errno));
     return 21;
   }
   if (copy_file(src, KSUD_STAGE_TMP, 0755) != 0) {
@@ -258,6 +275,13 @@ static int do_run_payload(const char *payload, const char *self,
       fsync(ph);
       close(ph);
     }
+    /* Same treatment for the helper stdio capture: root.c redirects the
+     * late-load role's stdout/stderr here, but that domain cannot create
+     * files in /data/local/tmp. */
+    int sh = open("/data/local/tmp/helper-stdio.log",
+        O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0666);
+    if (sh >= 0)
+      close(sh);
   }
 
   setenv("LD_PRELOAD", payload, 1);

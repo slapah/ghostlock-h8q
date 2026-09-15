@@ -239,6 +239,17 @@ int do_root_stage() {
           helper);
       pid_t h = fork();
       if (h == 0) {
+        /* Helper stdio -> placeholder file (pre-created shell-side; this
+         * domain cannot create files in /data/local/tmp). The helper's
+         * marks mirror to stderr, so this captures its whole story. */
+        int sfd = open("/data/local/tmp/helper-stdio.log",
+            O_WRONLY | O_TRUNC | O_CLOEXEC);
+        if (sfd >= 0) {
+          dup2(sfd, STDOUT_FILENO);
+          dup2(sfd, STDERR_FILENO);
+          if (sfd > STDERR_FILENO)
+            close(sfd);
+        }
         execl(LOGCAT_PATH, "cve-2026-43499-root", "late-load", (char *)NULL);
         ghost_mark("root: helper exec FAILED: %s", strerror(errno));
         _exit(13);
