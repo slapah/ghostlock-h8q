@@ -42,6 +42,11 @@
  * --run-payload role polls for it before exiting, so the app only sees
  * process exit after the root/KernelSU handoff has completed. */
 #define LATE_LOAD_STATUS "/data/local/tmp/cve43499-late-load.status"
+/* Developer stop point (same convention as the payload's ghostlock-no-ksud
+ * sentinel): with this file present, the late-load role reports a successful
+ * root stage WITHOUT promoting or exec'ing ksud — the chain is exercised up
+ * to, but not including, the ksud late-load that triggers init_module. */
+#define NO_LATE_LOAD_SENTINEL "/data/local/tmp/ghostlock-no-late-load"
 #define ROOT_WAIT_DEFAULT_SEC 150
 #define KSU_PRCTL_MAGIC 0xDEADBEEF
 #define KSU_CMD_GET_VERSION 2
@@ -143,6 +148,13 @@ static void write_late_load_status(int done, int root, int ksud_rc,
 
 static int do_late_load(void) {
   mark("late-load entered, uid=%d", getuid());
+
+  if (access(NO_LATE_LOAD_SENTINEL, F_OK) == 0) {
+    mark("late-load GATED by %s: root stage ok, ksud exec skipped",
+        NO_LATE_LOAD_SENTINEL);
+    write_late_load_status(1, getuid() == 0 ? 1 : 0, -2, 0);
+    return 0;
+  }
 
   const char *src = find_staged_ksud();
   if (!src) {
