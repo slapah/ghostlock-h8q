@@ -123,20 +123,33 @@ static int wait_status(pid_t pid) {
   return 1;
 }
 
+/* Probe with a real open(), not access(): on this target the app-private
+ * candidate passes access(R_OK) as uid 0 but fails open() with EPERM once
+ * SELinux re-arms (vendor_modprobe may not read app_data_file). */
+static int readable_file(const char *path) {
+  int fd = open(path, O_RDONLY | O_CLOEXEC);
+  if (fd < 0)
+    return 0;
+  char b;
+  ssize_t n = read(fd, &b, 1);
+  close(fd);
+  return n >= 0;
+}
+
 /* Locate the verified ksud the app staged before the exploit ran. */
 static const char *find_staged_ksud(void) {
   static const char *candidates[] = {
-    "/data/local/tmp/ksud-s25u-kdp", /* already promoted */
+    "/data/local/tmp/ksud-s25u-kdp", /* shell-staged by the app */
     "/data/data/dev.busung.s25uroot/files/ksu-bootstrap/ksud-s25u-kdp",
     "/data/user_de/0/dev.busung.s25uroot/files/ksu-bootstrap/ksud-s25u-kdp",
     "/data/local/tmp/ksud", /* adb/dev path */
     NULL,
   };
   const char *env = getenv("KSUD_SOURCE");
-  if (env && *env && access(env, R_OK) == 0)
+  if (env && *env && readable_file(env))
     return env;
   for (int i = 0; candidates[i]; i++)
-    if (access(candidates[i], R_OK) == 0)
+    if (readable_file(candidates[i]))
       return candidates[i];
   return NULL;
 }
