@@ -7,6 +7,15 @@
 #define LOG_TAG "GHOSTLOCK"
 #define KSU_LOADER_PATH "/data/local/tmp/ksud"
 #define LOGCAT_PATH "/system/bin/logcat"
+#define LATE_LOAD_STATUS "/data/local/tmp/cve43499-late-load.status"
+/* Chain-level dry-run gate: hand off to nothing, report a successful root
+ * stage so the pre-root helper's app-contract handshake can complete
+ * without any ksud/module load. */
+#define NO_LATE_LOAD_SENTINEL "/data/local/tmp/ghostlock-no-late-load"
+/* The inline ksud fallback ends in init_module, which currently panics on
+ * this target; make it opt-in so a helper failure degrades to a safe
+ * nonzero exit instead of a reboot. */
+#define ALLOW_INLINE_KSUD_SENTINEL "/data/local/tmp/ghostlock-allow-inline-ksud"
 
 #include <android/log.h>
 void android_log(const char *fmt, ...) {
@@ -16,6 +25,20 @@ void android_log(const char *fmt, ...) {
   __android_log_vprint(ANDROID_LOG_INFO, LOG_TAG, fmt, args);
 
   va_end(args);
+}
+
+static void write_late_load_status(int done, int root, int ksud_rc,
+    unsigned int ksu_version) {
+  int fd = open(LATE_LOAD_STATUS, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC,
+      0644);
+  if (fd >= 0) {
+    dprintf(fd, "done=%d root=%d ksud_rc=%d ksu_version=%u\n",
+        done, root, ksud_rc, ksu_version);
+    fsync(fd);
+    close(fd);
+  }
+  ghost_mark("root: late-load status written done=%d root=%d ksud_rc=%d",
+      done, root, ksud_rc);
 }
 
 static int wait_status(pid_t pid) {
@@ -175,6 +198,17 @@ int do_root_stage() {
     return 0;
   }
 
+  /* Chain-level dry run: report the root stage as done WITHOUT the KSU
+   * handoff, so the pre-root helper observes the full app contract
+   * (status file -> "done=1 root=1" -> exit 0) with no module load. */
+  if (access(NO_LATE_LOAD_SENTINEL, F_OK) == 0) {
+    android_log("late-load: %s set; root stage gated before KSU handoff\n",
+        NO_LATE_LOAD_SENTINEL);
+    ghost_mark("root: %s set; gated before KSU handoff", NO_LATE_LOAD_SENTINEL);
+    write_late_load_status(1, getuid() == 0 ? 1 : 0, -2, 0);
+    return 0;
+  }
+
   /* KernelSU handoff (Root-My-Galaxy contract): the dual-role root helper
    * auto-late-loads KernelSU. The app stages the helper and passes
    * CVE43499_ROOT_HELPER; the adb/dev path falls back to
@@ -183,31 +217,55 @@ int do_root_stage() {
   if (!helper || !*helper)
     helper = "/data/local/tmp/cve-2026-43499-root";
   if (access(helper, X_OK) == 0) {
-    ghost_mark("root: KSU handoff via helper %s late-load", helper);
-    pid_t h = fork();
-    if (h == 0) {
-      execl(helper, "cve-2026-43499-root", "late-load", (char *)NULL);
-      ghost_mark("root: helper exec FAILED: %s", strerror(errno));
-      _exit(13);
+    /* load_policy above re-arms SELinux: this domain (vendor_modprobe) may
+     * NOT exec shell_data_file directly — the denial lands at the cred
+     * commit point of execve, which delivers SIGKILL (observed: helper
+     * died with 137 ~1ms after exec, before its first instruction). Bind
+     * the helper over a system binary and exec THAT instead, the same
+     * trick the inline ksud path already uses successfully. */
+    if (unshare(CLONE_NEWNS) == 0 &&
+        mount(NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL) == 0 &&
+        mount(helper, LOGCAT_PATH, NULL, MS_BIND, NULL) == 0) {
+      ghost_mark("root: KSU handoff via helper %s late-load (bind over logcat)",
+          helper);
+      pid_t h = fork();
+      if (h == 0) {
+        execl(LOGCAT_PATH, "cve-2026-43499-root", "late-load", (char *)NULL);
+        ghost_mark("root: helper exec FAILED: %s", strerror(errno));
+        _exit(13);
+      }
+      if (h < 0) {
+        android_log("late-load: helper fork: %s\n", strerror(errno));
+        ghost_mark("root: helper fork FAILED: %s", strerror(errno));
+        _exit(12);
+      }
+      int hstatus = wait_status(h);
+      android_log("[*] root helper late-load result=%d\n", hstatus);
+      ghost_mark("root: helper late-load exited status=%d", hstatus);
+      if (hstatus == 0)
+        return 0;
+      ghost_mark("root: helper late-load failed status=%d", hstatus);
+    } else {
+      ghost_mark("root: helper bind-mount FAILED: %s", strerror(errno));
     }
-    if (h < 0) {
-      android_log("late-load: helper fork: %s\n", strerror(errno));
-      ghost_mark("root: helper fork FAILED: %s", strerror(errno));
-      _exit(12);
-    }
-    int hstatus = wait_status(h);
-    android_log("[*] root helper late-load result=%d\n", hstatus);
-    ghost_mark("root: helper late-load exited status=%d", hstatus);
-    if (hstatus == 0)
-      return 0;
-    ghost_mark("root: helper late-load failed; falling back to inline ksud");
+  } else {
+    ghost_mark("root: no root helper at %s", helper);
   }
 
-  /* Legacy dev path (no helper staged): late-load the upstream-lineage
-   * KernelSU ksud directly. DEFEX prohibits executing binaries from
-   * /data/local/tmp, so ksud is bind-mounted over /system/bin/logcat in a
-   * private mount namespace (no system-wide effect). */
-  ghost_mark("root: no root helper; inline ksud late-load");
+  /* Legacy dev path (no working helper): late-load the upstream-lineage
+   * KernelSU ksud directly. ksud's late-load ends in init_module, which
+   * currently panics on this target — so on a helper failure this path is
+   * OPT-IN via /data/local/tmp/ghostlock-allow-inline-ksud; without it we
+   * stop safely instead of rebooting the phone. DEFEX prohibits executing
+   * binaries from /data/local/tmp, so ksud is bind-mounted over
+   * /system/bin/logcat in a private mount namespace (no system-wide
+   * effect). */
+  if (access(ALLOW_INLINE_KSUD_SENTINEL, F_OK) != 0) {
+    ghost_mark("root: inline ksud fallback disabled (no %s); stopping safely",
+        ALLOW_INLINE_KSUD_SENTINEL);
+    return 28;
+  }
+  ghost_mark("root: inline ksud late-load (allowed by sentinel)");
   if (unshare(CLONE_NEWNS) != 0 ||
       mount(NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL) != 0) {
     android_log("late-load: private mount namespace: %s\n",
