@@ -86,18 +86,44 @@ int do_root_stage() {
   android_log("[*] Am I root? uid=%d\n", getuid());
   ghost_mark("root: entered, uid=%d", getuid());
 
-  /* Ephemeral temp_su.sock root: with /data/local/tmp/ghostlock-tempsu set,
-   * install the embedded su daemon NOW, while SELinux is still permissive from
-   * the exploit and before load_policy re-arms vendor_modprobe restrictions.
-   * The daemon serves root shells by fork+exec inheritance, so it never
-   * triggers the Samsung RKP app->root cred check. Return before the KSU
-   * handoff so RKP is never exercised — re-run the exploit after each reboot. */
+  /* Disable + remove conflicting Zygisk modules BEFORE the KSU handoff mounts
+   * them. Vector (zygisk_vector) ships its own Zygisk; on a re-jailbreak its
+   * surviving daemon and dex2oat bind-mounts collide with the fresh mount and
+   * panic the device. This runs while SELinux is still permissive (pre
+   * load_policy), so writes into /data/adb succeed, then falls through to the
+   * normal handoff. `disable` skips the mount this boot (stops the reboot);
+   * `remove` deletes the module on the next real reboot. */
   {
-    int gate = access("/data/local/tmp/ghostlock-tempsu", F_OK);
-    ghost_mark("root: tempsu gate access=%d errno=%d uid=%d", gate, errno,
-        getuid());
+    static const char *victims[] = {
+      "/data/adb/modules/zygisk_vector",
+      NULL,
+    };
+    for (int i = 0; victims[i]; i++) {
+      char p[256];
+      struct stat st;
+      if (stat(victims[i], &st) != 0)
+        continue;
+      snprintf(p, sizeof(p), "%s/disable", victims[i]);
+      int fd = open(p, O_WRONLY | O_CREAT | O_CLOEXEC, 0644);
+      if (fd >= 0)
+        close(fd);
+      snprintf(p, sizeof(p), "%s/remove", victims[i]);
+      fd = open(p, O_WRONLY | O_CREAT | O_CLOEXEC, 0644);
+      if (fd >= 0)
+        close(fd);
+      ghost_mark("root: disabled+removed conflicting module %s", victims[i]);
+    }
+    /* Also kill any Vector daemon left running from a previous jailbreak, so it
+     * cannot collide with a fresh mount even before the reboot that clears it. */
+    (void)system("for p in $(pgrep -f '^vectord' 2>/dev/null); do kill -9 \"$p\"; done 2>/dev/null");
+  }
+
+  /* Ephemeral temp_su.sock root: opt-in via /data/local/tmp/ghostlock-tempsu.
+   * Installs the embedded su daemon while permissive and returns before the KSU
+   * handoff, so RKP is never exercised. Off by default; the normal path below
+   * proceeds to the KernelSU handoff. */
+  if (access("/data/local/tmp/ghostlock-tempsu", F_OK) == 0) {
     pid_t sud = -1;
-    ghost_mark("root: tempsu install starting");
     int rc = install_embedded_su(&sud);
     ghost_mark("root: tempsu install rc=%d daemon_pid=%d", rc, (int)sud);
     return rc ? 0 : 1;
