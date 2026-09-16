@@ -1,0 +1,6 @@
+id=rezygisk_lsposed_srb_guard
+name=ReZygisk/LSPosed Soft-Reboot Guard
+version=v0.1.0
+versionCode=1
+author=slapah
+description=Kills stale ReZygisk (zygiskd/zygisk-ptrace) and LSPosed (lspd) daemons during a KernelSU emulated soft reboot so the replacement service stage starts a single clean set instead of a double daemon.

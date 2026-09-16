@@ -36,6 +36,8 @@ public class MainActivity extends AppCompatActivity {
     private static final String KSUD = TMP + "ksud";
     private static final String ZYGISK_ASSET = "rezygisk-h8q.zip";
     private static final String ZYGISK_TMP = TMP + "rezygisk-h8q.zip";
+    private static final String GUARD_ASSET = "lsposed-guard.zip";
+    private static final String GUARD_TMP = TMP + "lsposed-guard.zip";
 
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
     private final Handler ui = new Handler(Looper.getMainLooper());
@@ -209,18 +211,25 @@ public class MainActivity extends AppCompatActivity {
         }
         worker.execute(() -> {
             try {
-                log("[*] Staging ReZygisk ...");
+                log("[*] Staging ReZygisk + soft-reboot guard ...");
                 stageAsset(ZYGISK_ASSET, ZYGISK_TMP);
-                log("[+] Staged " + ZYGISK_TMP);
+                stageAsset(GUARD_ASSET, GUARD_TMP);
+                log("[+] Staged " + ZYGISK_TMP + " and " + GUARD_TMP);
+
                 Process p = ShizukuController.exec(new String[]{
-                        "su", "-c", "ksud module install " + ZYGISK_TMP + " 2>&1"
+                        "su", "-c",
+                        "ksud module install " + ZYGISK_TMP + " 2>&1; " +
+                                "echo '--- guard ---'; " +
+                                "ksud module install " + GUARD_TMP + " 2>&1"
                 }, null, TMP);
                 pump(p.getInputStream(), "Zygisk: ");
                 pump(p.getErrorStream(), "Zygisk: ");
                 int code = p.waitFor();
                 log("[" + (code == 0 ? "+" : "!") + "] Install Zygisk exited (" + code + ")");
                 if (code == 0) {
-                    log("    Reboot (or Soft Reboot) to activate ReZygisk.");
+                    log("    Installed ReZygisk + the soft-reboot guard that kills stale");
+                    log("    zygiskd/lspd daemons, so LSPosed won't double-daemon after a");
+                    log("    KernelSU Soft Reboot. Reboot (or Soft Reboot) to activate.");
                 }
             } catch (Throwable t) {
                 log("[!] Install Zygisk: " + t.getMessage());
