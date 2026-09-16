@@ -1,0 +1,16 @@
+apk/app/src/main/assets/preload.so
+apk/app/src/main/java/dev/ghostlock/h8q/MainActivity.java
+apk/release/GhostLock-h8q.apk
+Makefile
+src/common.h
+src/koload.c
+src/main.c
+src/mark.c
+src/preload.c
+src/primer.c
+src/root.c
+src/roothelper.c
+src/slide.c
+src/targets/h8q-F971USQU1AZFW/target.h
+src/threads.c
+src/util.c

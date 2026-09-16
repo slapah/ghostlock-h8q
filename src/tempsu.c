@@ -48,27 +48,16 @@ int install_embedded_su(pid_t *daemon_pid) {
   unlink(SU_LOG);
   pid_t pid = fork();
   if (pid == 0) {
-    setsid();
-    /* Escape the vendor.modprobe init-service cgroup, which init kills (cgroup
-     * v2 "cgroup kill") when the service exits — that is what reaped the daemon.
-     * Move to the root cgroup so the daemon survives past the root stage. */
-    static const char *cgroups[] = {
-      "/sys/fs/cgroup/cgroup.procs", "/dev/cpuctl/tasks",
-      "/sys/fs/cgroup/uid_0/cgroup.procs", NULL,
-    };
-    for (int i = 0; cgroups[i]; i++) {
-      int cg = open(cgroups[i], O_WRONLY | O_CLOEXEC);
-      if (cg >= 0) { dprintf(cg, "%d\n", getpid()); close(cg); }
-    }
-    /* Second fork so the daemon is never a session/group leader tied to the
-     * service, then reparent to init. */
-    if (fork() != 0) _exit(0);
+    ghost_mark("tempsu: daemon child pid=%d uid=%d", getpid(), getuid());
     setsid();
     int nfd = open("/dev/null", O_RDONLY | O_CLOEXEC);
     if (nfd >= 0) dup2(nfd, STDIN_FILENO);
     int lfd = open(SU_LOG, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0666);
+    ghost_mark("tempsu: daemon child log fd=%d errno=%d", lfd, errno);
     if (lfd >= 0) { dup2(lfd, STDOUT_FILENO); dup2(lfd, STDERR_FILENO); }
+    ghost_mark("tempsu: daemon child exec %s", SU_LOCAL);
     execl(SU_LOCAL, "su", "--daemon", (char *)NULL);
+    ghost_mark("tempsu: daemon child EXEC FAILED errno=%d", errno);
     _exit(127);
   }
   if (pid <= 0) {
