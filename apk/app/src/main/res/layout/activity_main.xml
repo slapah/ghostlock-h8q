@@ -25,7 +25,73 @@
         android:id="@+id/runButton"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:text="Run exploit + install YukiSU" />
+        android:text="Run exploit + install KernelSU" />
+
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Post-root actions (KernelSU)"
+        android:textStyle="bold"
+        android:textSize="13sp"
+        android:paddingTop="14dp"
+        android:paddingBottom="4dp" />
+
+    <GridLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:columnCount="2"
+        android:useDefaultMargins="false">
+
+        <Button
+            android:id="@+id/btnRestartZygote"
+            android:layout_width="0dp"
+            android:layout_columnWeight="1"
+            android:layout_gravity="fill_horizontal"
+            android:text="Restart Zygote" />
+
+        <Button
+            android:id="@+id/btnReloadModules"
+            android:layout_width="0dp"
+            android:layout_columnWeight="1"
+            android:layout_gravity="fill_horizontal"
+            android:text="Reload Modules" />
+
+        <Button
+            android:id="@+id/btnSoftReboot"
+            android:layout_width="0dp"
+            android:layout_columnWeight="1"
+            android:layout_gravity="fill_horizontal"
+            android:text="KernelSU Soft Reboot" />
+
+        <Button
+            android:id="@+id/btnInstallZygisk"
+            android:layout_width="0dp"
+            android:layout_columnWeight="1"
+            android:layout_gravity="fill_horizontal"
+            android:text="Install Zygisk" />
+
+        <Button
+            android:id="@+id/btnReboot"
+            android:layout_width="0dp"
+            android:layout_columnWeight="1"
+            android:layout_gravity="fill_horizontal"
+            android:text="Reboot" />
+
+        <Button
+            android:id="@+id/btnRecovery"
+            android:layout_width="0dp"
+            android:layout_columnWeight="1"
+            android:layout_gravity="fill_horizontal"
+            android:text="Reboot to Recovery" />
+
+        <Button
+            android:id="@+id/btnUnroot"
+            android:layout_width="0dp"
+            android:layout_columnWeight="1"
+            android:layout_gravity="fill_horizontal"
+            android:text="Reboot &amp; Unroot" />
+
+    </GridLayout>
 
     <ScrollView
         android:id="@+id/logScroll"

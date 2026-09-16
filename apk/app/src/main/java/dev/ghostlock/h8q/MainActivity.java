@@ -7,6 +7,7 @@ import android.widget.Button;
 import android.widget.ScrollView;
 import android.widget.TextView;
 
+import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
 
 import java.io.BufferedReader;
@@ -19,20 +20,22 @@ import java.util.concurrent.Executors;
 import rikka.shizuku.Shizuku;
 
 /**
- * One-button harness for the GhostLock (CVE-2026-43499) chain on SM-F971U.
+ * GhostLock (CVE-2026-43499) harness for SM-F971U plus post-root management.
  *
- * It reproduces the manual adb procedure entirely on-device by borrowing a
- * shell-uid process from Shizuku:
- *   1. stage preload.so + ksud into /data/local/tmp (shell-owned),
- *   2. run  env LD_PRELOAD=/data/local/tmp/preload.so sh  — the payload's
- *      constructor fires, exploits the kernel, and hands off to ksud,
- *   3. tail logcat GHOSTLOCK so the root result is visible in the app.
+ * The exploit runs by borrowing a shell-uid process from Shizuku and firing the
+ * payload constructor via LD_PRELOAD. Once KernelSU is installed, the post-root
+ * buttons run the same management actions Root-My-Galaxy exposes — restart
+ * Zygote, reload modules, KernelSU soft reboot, reboot, recovery, unroot, and
+ * install the bundled ReZygisk — each as a single `su -c` command through the
+ * same Shizuku shell.
  */
 public class MainActivity extends AppCompatActivity {
 
     private static final String TMP = "/data/local/tmp/";
     private static final String PRELOAD = TMP + "preload.so";
     private static final String KSUD = TMP + "ksud";
+    private static final String ZYGISK_ASSET = "rezygisk-h8q.zip";
+    private static final String ZYGISK_TMP = TMP + "rezygisk-h8q.zip";
 
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
     private final Handler ui = new Handler(Looper.getMainLooper());
@@ -63,6 +66,44 @@ public class MainActivity extends AppCompatActivity {
         runButton = findViewById(R.id.runButton);
         Shizuku.addRequestPermissionResultListener(permListener);
         runButton.setOnClickListener(v -> onRun());
+
+        // Post-root management actions.
+        findViewById(R.id.btnRestartZygote).setOnClickListener(v -> rootAction(
+                "Restart Zygote",
+                "setprop ctl.restart zygote; " +
+                        "[ \"$(getprop init.svc.zygote_secondary)\" = running ] && " +
+                        "setprop ctl.restart zygote_secondary; echo 'zygote restart requested'"));
+
+        findViewById(R.id.btnReloadModules).setOnClickListener(v -> rootAction(
+                "Reload Modules",
+                "ksud debug post-fs-data 2>&1; ksud debug boot-complete 2>&1; " +
+                        "setprop ctl.restart zygote; echo 'modules re-triggered; zygote restarted'"));
+
+        findViewById(R.id.btnSoftReboot).setOnClickListener(v -> rootAction(
+                "KernelSU Soft Reboot",
+                "ksud soft-reboot 2>&1 || " +
+                        "{ setprop ctl.restart zygote; echo 'fell back to zygote restart'; }"));
+
+        findViewById(R.id.btnInstallZygisk).setOnClickListener(v -> installZygisk());
+
+        findViewById(R.id.btnReboot).setOnClickListener(v -> confirm(
+                "Reboot", "Reboot the device now?",
+                () -> rootAction("Reboot", "svc power reboot 2>/dev/null || reboot")));
+
+        findViewById(R.id.btnRecovery).setOnClickListener(v -> confirm(
+                "Reboot to Recovery", "Reboot into recovery now?",
+                () -> rootAction("Reboot to Recovery",
+                        "svc power reboot recovery 2>/dev/null || reboot recovery")));
+
+        findViewById(R.id.btnUnroot).setOnClickListener(v -> confirm(
+                "Reboot & Unroot",
+                "This removes /data/adb/ksud and all KernelSU modules, then reboots. " +
+                        "The device will be unrooted until you run the exploit again. Continue?",
+                () -> rootAction("Reboot & Unroot",
+                        "for m in /data/adb/modules/*/; do touch \"$m/remove\" 2>/dev/null; done; " +
+                                "ksud uninstall 2>&1; " +
+                                "rm -rf /data/adb/ksud /data/adb/ksu /data/adb/modules 2>/dev/null; " +
+                                "sync; echo unrooted; svc power reboot 2>/dev/null || reboot")));
     }
 
     @Override
@@ -71,6 +112,8 @@ public class MainActivity extends AppCompatActivity {
         Shizuku.removeRequestPermissionResultListener(permListener);
         worker.shutdownNow();
     }
+
+    // ---- exploit run ----------------------------------------------------
 
     private void onRun() {
         setBusy(true);
@@ -114,9 +157,7 @@ public class MainActivity extends AppCompatActivity {
             log("[*] payload sh exited (" + code + ")");
             log("[*] Watching logcat for GHOSTLOCK — a line reading uid=0(root)\n" +
                     "    means success. If the phone REBOOTS, that is a kernel panic,\n" +
-                    "    not success: afterwards run\n" +
-                    "    adb pull /data/local/tmp/ghostlock-markers.log\n" +
-                    "    and read the last line — it names the phase that panicked.");
+                    "    not success.");
         } catch (Throwable t) {
             log("[!] " + t.getClass().getSimpleName() + ": " + t.getMessage());
         } finally {
@@ -124,13 +165,77 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
+    // ---- post-root actions ----------------------------------------------
+
+    /** Confirm a destructive action, then run onYes. */
+    private void confirm(String title, String message, Runnable onYes) {
+        new AlertDialog.Builder(this)
+                .setTitle(title)
+                .setMessage(message)
+                .setPositiveButton("Continue", (d, w) -> onYes.run())
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    /** Run a single command as root (su -c) through the Shizuku shell, streaming output. */
+    private void rootAction(String label, String command) {
+        if (!ShizukuController.isRunning() || !ShizukuController.isGranted()) {
+            log("[!] " + label + ": Shizuku not ready (grant permission via Run first)");
+            return;
+        }
+        worker.execute(() -> {
+            try {
+                log("[*] " + label + " ...");
+                Process p = ShizukuController.exec(
+                        new String[]{"su", "-c", command}, null, TMP);
+                pump(p.getInputStream(), label + ": ");
+                pump(p.getErrorStream(), label + ": ");
+                int code = p.waitFor();
+                log("[" + (code == 0 ? "+" : "!") + "] " + label + " exited (" + code + ")");
+                if (code != 0) {
+                    log("    (non-zero usually means su is unavailable — root not active)");
+                }
+            } catch (Throwable t) {
+                log("[!] " + label + ": " + t.getMessage());
+            }
+        });
+    }
+
+    /** Stage the bundled ReZygisk zip and install it as a KernelSU module. */
+    private void installZygisk() {
+        if (!ShizukuController.isRunning() || !ShizukuController.isGranted()) {
+            log("[!] Install Zygisk: Shizuku not ready (grant permission via Run first)");
+            return;
+        }
+        worker.execute(() -> {
+            try {
+                log("[*] Staging ReZygisk ...");
+                stageAsset(ZYGISK_ASSET, ZYGISK_TMP);
+                log("[+] Staged " + ZYGISK_TMP);
+                Process p = ShizukuController.exec(new String[]{
+                        "su", "-c", "ksud module install " + ZYGISK_TMP + " 2>&1"
+                }, null, TMP);
+                pump(p.getInputStream(), "Zygisk: ");
+                pump(p.getErrorStream(), "Zygisk: ");
+                int code = p.waitFor();
+                log("[" + (code == 0 ? "+" : "!") + "] Install Zygisk exited (" + code + ")");
+                if (code == 0) {
+                    log("    Reboot (or Soft Reboot) to activate ReZygisk.");
+                }
+            } catch (Throwable t) {
+                log("[!] Install Zygisk: " + t.getMessage());
+            }
+        });
+    }
+
+    // ---- helpers --------------------------------------------------------
+
     private void stageAsset(String assetName, String remotePath) throws Exception {
         try (InputStream is = getAssets().open(assetName)) {
             ShizukuController.writeFile(remotePath, "755", is);
         }
     }
 
-    /** Tail the GHOSTLOCK logcat tag on a background thread. */
     private void startLogcatTail() {
         worker.execute(() -> {
             try {
