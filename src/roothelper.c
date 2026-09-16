@@ -89,7 +89,15 @@ static int copy_file(const char *src, const char *dst, mode_t mode) {
   int in = open(src, O_RDONLY | O_CLOEXEC);
   if (in < 0)
     return -1;
-  int out = open(dst, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, mode);
+  /* The late-load role runs in vendor_modprobe (post load_policy), which can
+   * WRITE an existing shell_data_file in /data/local/tmp but is denied CREATE
+   * of a new file there — the exact EPERM seen promoting ksud. Mirror the
+   * write_late_load_status / helper-stdio idiom: write-without-create first,
+   * into the shell-side placeholder, and only fall back to O_CREAT for a
+   * domain (or dev path) that is allowed to create. */
+  int out = open(dst, O_WRONLY | O_TRUNC | O_CLOEXEC);
+  if (out < 0 && errno == ENOENT)
+    out = open(dst, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, mode);
   if (out < 0) {
     close(in);
     return -1;
@@ -182,6 +190,51 @@ static void write_late_load_status(int done, int root, int ksud_rc,
       done, root, ksud_rc, ksu_version);
 }
 
+/* Enable a KernelSU feature by name via the bind-mounted ksud (LOGCAT_PATH).
+ * Runs after the LKM is live and --allow-shell has crowned this shell context
+ * as root, so the set_feature ksucall is authorized. Best-effort: a failure is
+ * logged but never fails the root handoff. */
+static int ksud_feature_set(const char *name, const char *value) {
+  pid_t f = fork();
+  if (f < 0) {
+    mark("feature %s=%s: fork failed: %s", name, value, strerror(errno));
+    return -1;
+  }
+  if (f == 0) {
+    int slog = open("/data/local/tmp/ksud-stdio.log",
+        O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
+    if (slog >= 0) {
+      dup2(slog, STDOUT_FILENO);
+      dup2(slog, STDERR_FILENO);
+      if (slog > STDERR_FILENO)
+        close(slog);
+    }
+    execl(LOGCAT_PATH, "ksud", "feature", "set", name, value, (char *)NULL);
+    _exit(126);
+  }
+  int rc = wait_status(f);
+  mark("feature set %s=%s rc=%d", name, value, rc);
+  return rc;
+}
+
+/* Turn on shell-facing root once KernelSU is live:
+ *   adb_root  — kernel escalates adbd's execve to uid 0, so `adb shell` is root
+ *               with no su binary (fixes "can't give the shell su").
+ *   su_compat — lets authorized apps (the GhostLock manager) gain root via the
+ *               traditional `su -c` used by the post-root action buttons. */
+static void enable_shell_root(void) {
+  ksud_feature_set("adb_root", "1");
+  ksud_feature_set("su_compat", "1");
+  /* Persist so the settings survive a KernelSU soft reboot / module reload. */
+  pid_t f = fork();
+  if (f == 0) {
+    execl(LOGCAT_PATH, "ksud", "feature", "save", (char *)NULL);
+    _exit(126);
+  }
+  if (f > 0)
+    mark("feature save rc=%d", wait_status(f));
+}
+
 static int do_late_load(void) {
   mark("late-load entered, uid=%d", getuid());
 
@@ -251,6 +304,8 @@ static int do_late_load(void) {
   if (!ok)
     mark("late-load: KernelSU control check failed ksud_rc=%d version=%u",
         status, ksu_version);
+  else
+    enable_shell_root();
   write_late_load_status(ok ? 1 : 0, getuid() == 0 ? 1 : 0, status,
       ksu_version);
   return ok ? 0 : (status ? status : 27);

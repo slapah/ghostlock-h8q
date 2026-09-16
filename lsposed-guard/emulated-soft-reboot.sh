@@ -1,10 +1,12 @@
 #!/system/bin/sh
 # KernelSU runs this in PID 1's mount namespace, before Android userspace is
-# stopped for an emulated soft reboot. ReZygisk's daemon/ptrace monitor and
-# LSPosed's lspd otherwise survive the transition; KernelSU then re-runs the
-# module service stage and starts a second set, so two lspd (and two zygiskd)
-# race for the same control socket and LSPosed misbehaves. Terminate the old
-# daemons here so the service stage brings up exactly one of each.
+# stopped for an emulated soft reboot. Zygisk Next stops and restarts its own
+# injector cleanly across a soft reboot (its emulated-soft-reboot.sh runs
+# `injector --ctl exit`), so this guard leaves the injector alone. LSPosed's
+# lspd, however, still survives the transition; KernelSU then re-runs the
+# module service stage and starts a second lspd, so two race for the same
+# control socket and LSPosed misbehaves. Terminate the stale lspd here so the
+# service stage brings up exactly one.
 
 MODDIR=${0%/*}
 RESULT_FILE="$MODDIR/last-result.txt"
@@ -13,9 +15,10 @@ terminated=
 killed=
 failures=
 
-# The exact daemon comm/first-arg values to match. zygiskd / zygiskd64 =
-# ReZygisk daemon; zygisk-ptrace* = its zygote monitor; lspd = LSPosed daemon.
-DAEMONS="zygiskd zygiskd64 zygisk-ptrace32 zygisk-ptrace64 lspd"
+# The exact daemon comm/first-arg values to match. lspd = LSPosed daemon.
+# Zygisk Next's own injector is intentionally excluded — it manages its own
+# lifecycle across the soft reboot, and killing it here would race that.
+DAEMONS="lspd"
 
 matches_daemon() {
     _md_pid=$1
@@ -67,8 +70,8 @@ status=ok
 chmod 0600 "$RESULT_FILE" 2>/dev/null
 
 if [ "$status" = ok ]; then
-    log -p i -t ReZygiskLSPosedGuard "stale zygisk/lspd daemons stopped"
+    log -p i -t ZygiskNextLSPosedGuard "stale zygisk/lspd daemons stopped"
 else
-    log -p w -t ReZygiskLSPosedGuard "cleanup incomplete; see $RESULT_FILE"
+    log -p w -t ZygiskNextLSPosedGuard "cleanup incomplete; see $RESULT_FILE"
 fi
 exit 0

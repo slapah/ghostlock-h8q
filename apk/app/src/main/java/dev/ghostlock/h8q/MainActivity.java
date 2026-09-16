@@ -25,19 +25,23 @@ import rikka.shizuku.Shizuku;
  * The exploit runs by borrowing a shell-uid process from Shizuku and firing the
  * payload constructor via LD_PRELOAD. Once KernelSU is installed, the post-root
  * buttons run the same management actions Root-My-Galaxy exposes — restart
- * Zygote, reload modules, KernelSU soft reboot, reboot, recovery, unroot, and
- * install the bundled ReZygisk — each as a single `su -c` command through the
- * same Shizuku shell.
+ * Zygote, reload modules, KernelSU soft reboot, reboot, recovery, unroot,
+ * install the bundled Zygisk Next, and install LSPosed — each as a single
+ * `su -c` command through the same Shizuku shell.
  */
 public class MainActivity extends AppCompatActivity {
 
     private static final String TMP = "/data/local/tmp/";
     private static final String PRELOAD = TMP + "preload.so";
     private static final String KSUD = TMP + "ksud";
-    private static final String ZYGISK_ASSET = "rezygisk-h8q.zip";
-    private static final String ZYGISK_TMP = TMP + "rezygisk-h8q.zip";
+    private static final String HELPER_ASSET = "cve-2026-43499-root";
+    private static final String HELPER = TMP + "cve-2026-43499-root";
+    private static final String ZYGISK_ASSET = "zygisk-next-h8q.zip";
+    private static final String ZYGISK_TMP = TMP + "zygisk-next-h8q.zip";
     private static final String GUARD_ASSET = "lsposed-guard.zip";
     private static final String GUARD_TMP = TMP + "lsposed-guard.zip";
+    private static final String LSPOSED_ASSET = "lsposed.zip";
+    private static final String LSPOSED_TMP = TMP + "lsposed.zip";
 
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
     private final Handler ui = new Handler(Looper.getMainLooper());
@@ -87,6 +91,8 @@ public class MainActivity extends AppCompatActivity {
                         "{ setprop ctl.restart zygote; echo 'fell back to zygote restart'; }"));
 
         findViewById(R.id.btnInstallZygisk).setOnClickListener(v -> installZygisk());
+
+        findViewById(R.id.btnInstallLsposed).setOnClickListener(v -> installLsposed());
 
         findViewById(R.id.btnReboot).setOnClickListener(v -> confirm(
                 "Reboot", "Reboot the device now?",
@@ -145,7 +151,8 @@ public class MainActivity extends AppCompatActivity {
             log("[*] Staging payloads to /data/local/tmp ...");
             stageAsset("preload.so", PRELOAD);
             stageAsset("ksud", KSUD);
-            log("[+] Staged preload.so and ksud");
+            stageAsset(HELPER_ASSET, HELPER);
+            log("[+] Staged preload.so, ksud, and the root helper");
 
             startLogcatTail();
 
@@ -203,7 +210,7 @@ public class MainActivity extends AppCompatActivity {
         });
     }
 
-    /** Stage the bundled ReZygisk zip and install it as a KernelSU module. */
+    /** Stage the bundled Zygisk Next zip and install it as a KernelSU module. */
     private void installZygisk() {
         if (!ShizukuController.isRunning() || !ShizukuController.isGranted()) {
             log("[!] Install Zygisk: Shizuku not ready (grant permission via Run first)");
@@ -211,7 +218,7 @@ public class MainActivity extends AppCompatActivity {
         }
         worker.execute(() -> {
             try {
-                log("[*] Staging ReZygisk + soft-reboot guard ...");
+                log("[*] Staging Zygisk Next + soft-reboot guard ...");
                 stageAsset(ZYGISK_ASSET, ZYGISK_TMP);
                 stageAsset(GUARD_ASSET, GUARD_TMP);
                 log("[+] Staged " + ZYGISK_TMP + " and " + GUARD_TMP);
@@ -227,12 +234,45 @@ public class MainActivity extends AppCompatActivity {
                 int code = p.waitFor();
                 log("[" + (code == 0 ? "+" : "!") + "] Install Zygisk exited (" + code + ")");
                 if (code == 0) {
-                    log("    Installed ReZygisk + the soft-reboot guard that kills stale");
-                    log("    zygiskd/lspd daemons, so LSPosed won't double-daemon after a");
-                    log("    KernelSU Soft Reboot. Reboot (or Soft Reboot) to activate.");
+                    log("    Installed Zygisk Next (id=zygisknextsu). It stops/restarts its");
+                    log("    own injector across a KernelSU Soft Reboot; the bundled guard");
+                    log("    only clears a stale LSPosed lspd so it won't double-daemon.");
+                    log("    Reboot (or Soft Reboot) to activate.");
                 }
             } catch (Throwable t) {
                 log("[!] Install Zygisk: " + t.getMessage());
+            }
+        });
+    }
+
+    /** Stage the bundled LSPosed zip and install it as a KernelSU module. */
+    private void installLsposed() {
+        if (!ShizukuController.isRunning() || !ShizukuController.isGranted()) {
+            log("[!] Install LSPosed: Shizuku not ready (grant permission via Run first)");
+            return;
+        }
+        worker.execute(() -> {
+            try {
+                log("[*] Staging LSPosed ...");
+                stageAsset(LSPOSED_ASSET, LSPOSED_TMP);
+                log("[+] Staged " + LSPOSED_TMP);
+
+                Process p = ShizukuController.exec(new String[]{
+                        "su", "-c",
+                        "ksud module install " + LSPOSED_TMP + " 2>&1"
+                }, null, TMP);
+                pump(p.getInputStream(), "LSPosed: ");
+                pump(p.getErrorStream(), "LSPosed: ");
+                int code = p.waitFor();
+                log("[" + (code == 0 ? "+" : "!") + "] Install LSPosed exited (" + code + ")");
+                if (code == 0) {
+                    log("    Installed LSPosed (Zygisk flavour). It needs Zygisk Next active,");
+                    log("    so Install Zygisk first, then reboot. Note: this build targets");
+                    log("    up to Android 14 — on Android 17 it may fail to hook system_server.");
+                    log("    If hooks never load, use the Vector fork instead.");
+                }
+            } catch (Throwable t) {
+                log("[!] Install LSPosed: " + t.getMessage());
             }
         });
     }
