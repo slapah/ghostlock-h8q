@@ -266,10 +266,8 @@ public class MainActivity extends AppCompatActivity {
                 int code = p.waitFor();
                 log("[" + (code == 0 ? "+" : "!") + "] Install LSPosed exited (" + code + ")");
                 if (code == 0) {
-                    log("    Installed LSPosed (Zygisk flavour). It needs Zygisk Next active,");
-                    log("    so Install Zygisk first, then reboot. Note: this build targets");
-                    log("    up to Android 14 — on Android 17 it may fail to hook system_server.");
-                    log("    If hooks never load, use the Vector fork instead.");
+                    log("    Installed LSPosed v2.1.1 (Zygisk flavour, supports Android 9-17).");
+                    log("    It needs Zygisk Next active, so Install Zygisk first, then reboot.");
                 }
             } catch (Throwable t) {
                 log("[!] Install LSPosed: " + t.getMessage());
