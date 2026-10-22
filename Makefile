@@ -1,6 +1,12 @@
 PROJECT ?= h8q-F971USQU1AZFW
 OUTDIR  := build
 
+# $(OUT) does not encode PROJECT in its path, so `make PROJECT=B` after
+# `make PROJECT=A` would otherwise see an up-to-date preload.so and silently
+# keep A's binary -- i.e. ship the wrong kernel offsets to a device. The stamp
+# is PROJECT-specific, so switching PROJECT always forces a relink.
+PROJECT_STAMP := $(OUTDIR)/.project-$(PROJECT)
+
 TARGET_HEADER := src/targets/$(PROJECT)/target.h
 ifeq ($(wildcard $(TARGET_HEADER)),)
 $(error unknown PROJECT=$(PROJECT), missing $(TARGET_HEADER))
@@ -26,7 +32,11 @@ all: $(OUT)
 $(OUTDIR):
 	mkdir -p $@
 
-$(OUT): $(SRCS) $(TARGET_HEADER) src/offset.h src/common.h src/kernelsnitch/*.h | $(OUTDIR)
+$(PROJECT_STAMP): | $(OUTDIR)
+	rm -f $(OUTDIR)/.project-*
+	touch $@
+
+$(OUT): $(SRCS) $(TARGET_HEADER) $(PROJECT_STAMP) src/offset.h src/common.h src/kernelsnitch/*.h | $(OUTDIR)
 	$(CC) $(CFLAGS) $(SRCS) -shared -o $@
 	sha256sum $@
 
